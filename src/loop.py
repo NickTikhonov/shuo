@@ -45,6 +45,7 @@ from .services.tts import TTSService
 logger = logging.getLogger(__name__)
 
 
+# @TODO: Move this and all Twilio stuff in an separate lib file
 def parse_twilio_message(data: dict) -> Optional[Event]:
     """
     Parse raw Twilio WebSocket message into typed Event.
@@ -159,9 +160,6 @@ async def run_call(websocket: WebSocket) -> None:
     
     try:
         while True:
-            # ─────────────────────────────────────────────────────────────
-            # RECEIVE: Wait for event from any source
-            # ─────────────────────────────────────────────────────────────
             event = await event_queue.get()
             
             # Initialize player and executor when we get stream_sid
@@ -178,21 +176,11 @@ async def run_call(websocket: WebSocket) -> None:
                     tts=tts,
                 )
             
-            # ─────────────────────────────────────────────────────────────
-            # UPDATE: Pure state transition
-            # ─────────────────────────────────────────────────────────────
             state, actions = update(state, event)
-            
-            # ─────────────────────────────────────────────────────────────
-            # EXECUTE: Perform side effects
-            # ─────────────────────────────────────────────────────────────
             if executor:
                 for action in actions:
                     await executor.execute(action)
             
-            # ─────────────────────────────────────────────────────────────
-            # CHECK: Exit condition
-            # ─────────────────────────────────────────────────────────────
             if isinstance(event, StreamStopEvent):
                 logger.info("Stream stopped, exiting loop")
                 break
