@@ -1,0 +1,9 @@
+fastapi>=0.109.0
+uvicorn>=0.27.0
+websockets>=12.0
+twilio>=9.0.0
+torch>=2.0.0
+torchaudio>=2.0.0
+numpy>=1.24.0
+python-dotenv>=1.0.0
+# audioop-lts>=0.2.1  # Only needed for Python 3.13+ (audioop is built-in for earlier versions)
