@@ -9,4 +9,6 @@ python-dotenv>=1.0.0
 openai>=1.0.0
 deepgram-sdk>=3.0.0
 elevenlabs>=1.0.0
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
 # audioop-lts>=0.2.1  # Only needed for Python 3.13+ (audioop is built-in for earlier versions)

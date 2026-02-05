@@ -121,6 +121,7 @@ class LLMService:
                     await self._on_token(token)
             
             # Add assistant response to history if completed
+            # @TODO: I think this means we always append the full response to the history, even if it wasn't fully uttered! This might add extra stuff to history on the next message if we got interrupted.
             if self._running and assistant_response:
                 self._history.append({"role": "assistant", "content": assistant_response})
                 logger.info(f"LLM generation complete: {len(assistant_response)} chars")
