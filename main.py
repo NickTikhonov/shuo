@@ -22,7 +22,7 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 
-from src.server import app, init_conversation_manager
+from src.server import app, init_response_audio
 from src.twilio_client import make_outbound_call
 
 # Load environment variables
@@ -49,7 +49,10 @@ def start_server(port: int) -> None:
 
 
 def main():
-    """Main entry point."""
+    """
+    Starts the server (main loop)
+    Creates an outbound call to the specified phone number.
+    """
     # Check for phone number argument
     if len(sys.argv) < 2:
         print("Usage: python main.py +1234567890")
@@ -73,9 +76,9 @@ def main():
         print("Please create a response.wav file in the static/ directory")
         sys.exit(1)
     
-    # Initialize conversation manager with response audio
+    # Load response audio
     logger.info(f"Loading response audio from {response_audio_path}")
-    init_conversation_manager(str(response_audio_path))
+    init_response_audio(str(response_audio_path))
     
     # Start server in background thread
     logger.info(f"Starting server on port {port}")

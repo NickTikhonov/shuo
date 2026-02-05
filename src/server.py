@@ -2,22 +2,21 @@
 FastAPI server for voice agent.
 
 Provides endpoints:
-- GET /twiml - Returns TwiML to start Media Stream
+- POST /twiml - Returns TwiML to start Media Stream
 - WS /ws - WebSocket endpoint for Twilio Media Streams
 - GET /health - Health check
 """
 
 import os
 import logging
-from pathlib import Path
-from typing import Optional
+from typing import Tuple
 
 from fastapi import FastAPI, WebSocket, Response
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
-from .websocket_handler import TwilioMediaStreamHandler
-from .conversation import ConversationManager
+from .audio import load_response_audio
+from .loop import run_call
 
 # Load environment variables
 load_dotenv()
@@ -32,15 +31,17 @@ logger = logging.getLogger(__name__)
 # Create FastAPI app
 app = FastAPI(title="Voice Agent VAD System")
 
-# Global conversation manager (will be initialized with response audio)
-conversation_manager: Optional[ConversationManager] = None
+# Pre-loaded response audio chunks (immutable tuple)
+_response_chunks: Tuple[str, ...] = ()
 
 
-def init_conversation_manager(response_audio_path: str) -> None:
-    """Initialize the global conversation manager with response audio."""
-    global conversation_manager
-    conversation_manager = ConversationManager()
-    conversation_manager.load_response(response_audio_path)
+def init_response_audio(audio_path: str) -> None:
+    """Load response audio at startup."""
+    global _response_chunks
+    logger.info(f"Loading response audio from {audio_path}")
+    chunks = load_response_audio(audio_path)
+    _response_chunks = tuple(chunks)
+    logger.info(f"Loaded {len(_response_chunks)} audio chunks")
 
 
 @app.get("/health")
@@ -81,29 +82,19 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for Twilio Media Streams.
     
-    Handles bidirectional audio streaming between Twilio and our VAD system.
+    Delegates to the main event loop.
     """
     await websocket.accept()
     logger.info("WebSocket connection accepted")
     
-    if conversation_manager is None:
-        logger.error("Conversation manager not initialized")
+    if not _response_chunks:
+        logger.error("Response audio not loaded")
         await websocket.close()
         return
     
-    # Create handler with a fresh conversation state
-    # Note: We create a new ConversationManager for each call
-    # but share the loaded response audio
-    call_conversation = ConversationManager()
-    call_conversation.response_chunks = conversation_manager.response_chunks
-    
-    handler = TwilioMediaStreamHandler(
-        websocket=websocket,
-        conversation=call_conversation
-    )
-    
     try:
-        await handler.handle()
+        # Run the main event loop
+        await run_call(websocket, _response_chunks)
     except Exception as e:
         logger.error(f"WebSocket handler error: {e}")
     finally:

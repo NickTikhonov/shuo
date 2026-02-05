@@ -4,85 +4,116 @@ A Voice Activity Detection (VAD) system built on top of Twilio phone calls. This
 
 ## Architecture
 
+The system uses a **functional architecture** with an explicit event loop:
+
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Phone Call                               │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                    Twilio Media Stream                   │    │
-│  │                   (mulaw 8kHz base64)                    │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              WebSocket Handler (/ws)                     │    │
-│  │         Decode audio, manage stream lifecycle            │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │                  Silero VAD (16kHz)                      │    │
-│  │           Detect speech start/end events                 │    │
-│  └─────────────────────────────────────────────────────────┘    │
-│                              │                                   │
-│                              ▼                                   │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │               Conversation State Machine                 │    │
-│  │         LISTENING ←→ PLAYING (with interrupt)            │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                          MAIN LOOP (loop.py)                           │
+│                                                                         │
+│   while connected:                                                      │
+│       event = receive()                    # I/O - WebSocket/Timer     │
+│       state, actions = update(state, event) # PURE - No side effects  │
+│       for action in actions:                                           │
+│           execute(action)                  # I/O - Send to Twilio     │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Why Functional?
+
+- **Testable**: `update()` is pure - just call it with state and event, assert the result
+- **Debuggable**: Print state before/after any transition
+- **Extensible**: Add STT/LLM/TTS by adding new Events and Actions
+- **Predictable**: All state in one place, all side effects isolated
+
+## State Machine
+
+```
+                         ┌─────────────────────┐
+                         │                     │
+    ┌───────────────────►│     LISTENING       │◄────────────────┐
+    │                    │                     │                 │
+    │                    └──────────┬──────────┘                 │
+    │                               │                            │
+    │                    speech_end │                            │
+    │                               ▼                            │
+    │                    ┌─────────────────────┐                 │
+    │   interrupt        │                     │    playback     │
+    │   (speech_start)   │      PLAYING        │    complete     │
+    └────────────────────┤                     ├─────────────────┘
+                         └─────────────────────┘
+```
+
+## Project Structure
+
+```
+/vapi_clone
+├── README.md              # This file
+├── requirements.txt       # Python dependencies
+├── main.py                # CLI entry point
+├── static/
+│   └── response.wav       # Pre-recorded response audio
+└── src/
+    ├── types.py           # State, Events, Actions (dataclasses)
+    ├── vad.py             # Voice Activity Detection (pure functions)
+    ├── audio.py           # Audio codec utilities (pure functions)
+    ├── update.py          # State machine (pure function)
+    ├── effects.py         # Side effects (WebSocket I/O)
+    ├── loop.py            # Main event loop
+    ├── server.py          # FastAPI endpoints
+    └── twilio_client.py   # Outbound call initiation
+```
+
+## Key Files Explained
+
+### `types.py` - The Data Model
+All state is immutable dataclasses:
+- `AppState`: Complete application state
+- `Event`: Things that happen (MediaEvent, StreamStartEvent, etc.)
+- `Action`: Side effects to perform (SendAudioAction, ClearBufferAction, etc.)
+
+### `update.py` - The Brain
+Pure function: `(State, Event) -> (State, List[Action])`
+- No I/O, no side effects
+- All business logic in one place
+- Easy to test and reason about
+
+### `loop.py` - The Heart
+Explicit event loop:
+1. RECEIVE event from WebSocket or timer
+2. UPDATE state (call pure function)
+3. EXECUTE actions (perform side effects)
+
+### `effects.py` - The Boundary
+The ONLY place with side effects:
+- Send audio to Twilio
+- Send clear message
+- Manage playback timer
 
 ## Agent Rules
 
-1. **Modular Design**: Code is organized into focused modules:
-   - `audio.py` - Audio codec utilities
-   - `vad.py` - Voice activity detection
-   - `conversation.py` - State machine
-   - `websocket_handler.py` - Twilio integration
-   - `server.py` - FastAPI endpoints
-   - `twilio_client.py` - Outbound calls
-
-2. **Clean Python**: 
-   - Type hints throughout
-   - Dataclasses for configuration
-   - Async/await for I/O operations
-   - Comprehensive logging
-
-3. **VAD State Machine**:
-   - `LISTENING` → Wait for user to finish speaking
-   - `PLAYING` → Stream response audio
-   - Instant interrupt when user speaks during playback
-
-4. **Configurable Thresholds**:
-   - `threshold`: Speech probability cutoff (default: 0.5)
-   - `start_patience`: Min speech duration to trigger (default: 250ms)
-   - `end_patience`: Min silence duration to end turn (default: 700ms)
+1. **Functional Core, Imperative Shell**: Pure logic in `update.py`, I/O in `effects.py`
+2. **Immutable State**: All dataclasses are `frozen=True`
+3. **Explicit Loop**: No hidden callbacks, everything flows through the main loop
+4. **Clean Python**: Type hints, small functions, meaningful names
 
 ## Setup
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.9+
 - Twilio account with a phone number
 - ngrok for local development
 
 ### Installation
 
 ```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate
-
 # Install dependencies
 pip install -r requirements.txt
 ```
 
 ### Environment Variables
 
-Copy `.env.example` to `.env` and configure:
-
+Create `.env`:
 ```
 PORT=3040
 TWILIO_ACCOUNT_SID=your_account_sid
@@ -90,16 +121,6 @@ TWILIO_AUTH_TOKEN=your_auth_token
 TWILIO_PHONE_NUMBER=+1234567890
 TWILIO_PUBLIC_URL=https://your-subdomain.ngrok-free.app
 ```
-
-### ngrok Setup
-
-Start ngrok to expose your local server:
-
-```bash
-ngrok http 3040
-```
-
-Update `TWILIO_PUBLIC_URL` in `.env` with the ngrok URL.
 
 ## Usage
 
@@ -114,47 +135,38 @@ This will:
 4. The pre-recorded response will play
 5. If you speak during playback, it stops immediately
 
-## Project Structure
+## Extending to Full Voice Agent
 
+The architecture is designed for easy extension:
+
+```python
+# Add new phases
+class Phase(Enum):
+    LISTENING = auto()
+    TRANSCRIBING = auto()  # NEW: STT processing
+    THINKING = auto()       # NEW: LLM generating
+    SYNTHESIZING = auto()   # NEW: TTS generating
+    PLAYING = auto()
+
+# Add new events
+@dataclass(frozen=True)
+class TranscriptReadyEvent:
+    text: str
+
+@dataclass(frozen=True)
+class LLMResponseEvent:
+    text: str
+
+# Add new actions
+@dataclass(frozen=True)
+class TranscribeAction:
+    audio_chunks: Tuple[bytes, ...]
+
+@dataclass(frozen=True)
+class GenerateResponseAction:
+    transcript: str
+    history: Tuple[Turn, ...]
 ```
-/vapi_clone
-├── README.md              # This file
-├── requirements.txt       # Python dependencies
-├── main.py                # CLI entry point
-├── static/
-│   └── response.wav       # Pre-recorded response audio
-└── src/
-    ├── __init__.py
-    ├── audio.py           # mulaw encode/decode, resampling
-    ├── vad.py             # Silero VAD wrapper
-    ├── conversation.py    # State machine + audio playback
-    ├── websocket_handler.py  # Twilio Media Stream handling
-    ├── server.py          # FastAPI endpoints
-    └── twilio_client.py   # Outbound call initiation
-```
 
-## How It Works
-
-1. **Outbound Call**: `main.py` uses Twilio REST API to initiate a call
-2. **TwiML**: When answered, Twilio fetches `/twiml` which starts a Media Stream
-3. **WebSocket**: Twilio connects to `/ws` for bidirectional audio
-4. **VAD Processing**: 
-   - Audio arrives as base64 mulaw (8kHz)
-   - Decoded and upsampled to 16kHz for Silero VAD
-   - VAD outputs speech probability per 32ms window
-5. **State Machine**:
-   - Accumulates speech/silence duration
-   - Triggers `SPEECH_END` after 700ms of silence
-   - Starts audio playback
-6. **Interrupt Handling**:
-   - If speech detected during playback
-   - Send `clear` message to Twilio (stops buffered audio)
-   - Return to `LISTENING` state
-
-## Next Steps
-
-This VAD foundation can be extended with:
-- Speech-to-text (Deepgram, Whisper)
-- LLM processing (OpenAI, Claude)
-- Text-to-speech (ElevenLabs, OpenAI)
-- Dynamic response generation
+The `update()` function grows with new match cases, but stays pure.
+The `execute()` function handles new action types with async service calls.

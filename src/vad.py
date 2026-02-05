@@ -1,175 +1,170 @@
 """
 Voice Activity Detection using Silero VAD.
 
-Provides speech state tracking with configurable thresholds for:
-- Speech start detection (start_patience)
-- Speech end detection (end_patience)
-- Probability threshold
-
-The VAD processes 16kHz audio and outputs speech events.
+Pure functions for speech detection with configurable thresholds.
+No classes - just functions that transform state.
 """
 
 import time
-from enum import Enum, auto
-from dataclasses import dataclass
-from typing import Optional
+from typing import Tuple, Optional
 
 import torch
 import numpy as np
 
-
-class SpeechState(Enum):
-    """Current state of speech detection."""
-    SILENCE = auto()      # No speech detected
-    SPEAKING = auto()     # User is currently speaking
-    SPEECH_START = auto() # Just started speaking (transition event)
-    SPEECH_END = auto()   # Just stopped speaking (transition event)
+from .types import VADState
 
 
-@dataclass
-class VADConfig:
-    """Configuration for Voice Activity Detection."""
-    # Probability threshold for speech detection (0.0 - 1.0)
-    threshold: float = 0.5
-    
-    # Minimum duration of speech to trigger SPEECH_START (seconds)
-    # Prevents false triggers from clicks, coughs, etc.
-    start_patience: float = 0.25  # 250ms
-    
-    # Minimum duration of silence to trigger SPEECH_END (seconds)
-    # Higher = more natural pauses allowed, Lower = faster response
-    end_patience: float = 0.7  # 700ms
-    
-    # Sample rate expected by Silero VAD
-    sample_rate: int = 16000
+# =============================================================================
+# CONFIGURATION (constants, not class attributes)
+# =============================================================================
+
+THRESHOLD = 0.5          # Speech probability cutoff
+START_PATIENCE = 0.25    # 250ms of speech before confirming
+END_PATIENCE = 0.7       # 700ms of silence before end-of-turn
+WINDOW_SIZE = 512        # Silero VAD window (32ms at 16kHz)
+SAMPLE_RATE = 16000      # Silero expects 16kHz
 
 
-class VoiceActivityDetector:
-    """
-    Silero VAD wrapper with speech state tracking.
-    
-    Maintains internal state to detect speech start/end transitions
-    with configurable patience thresholds.
-    """
-    
-    def __init__(self, config: Optional[VADConfig] = None):
-        self.config = config or VADConfig()
-        
-        # Load Silero VAD model
-        self.model, self.utils = torch.hub.load(
+# =============================================================================
+# MODEL LOADING
+# =============================================================================
+
+_model = None
+_utils = None
+
+
+def get_vad_model():
+    """Load Silero VAD model (cached)."""
+    global _model, _utils
+    if _model is None:
+        _model, _utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
             force_reload=False,
             trust_repo=True
         )
-        
-        # Internal state
-        self._is_speaking = False
-        self._speech_start_time: Optional[float] = None
-        self._silence_start_time: Optional[float] = None
-        
-        # Audio buffer for accumulating samples
-        self._audio_buffer = np.array([], dtype=np.float32)
-        
-        # Silero VAD window size (512 samples at 16kHz = 32ms)
-        self._window_size = 512
+    return _model
+
+
+def reset_model_state():
+    """Reset the VAD model's internal state."""
+    model = get_vad_model()
+    model.reset_states()
+
+
+# =============================================================================
+# PURE FUNCTIONS
+# =============================================================================
+
+def process_audio(
+    vad_state: VADState,
+    audio_16k: np.ndarray,
+) -> Tuple[VADState, bool, bool]:
+    """
+    Process audio through VAD.
     
-    def reset(self) -> None:
-        """Reset VAD state for a new conversation."""
-        self._is_speaking = False
-        self._speech_start_time = None
-        self._silence_start_time = None
-        self._audio_buffer = np.array([], dtype=np.float32)
-        self.model.reset_states()
+    Pure function: (VADState, audio) -> (VADState, speech_started, speech_ended)
     
-    def process(self, audio: np.ndarray) -> SpeechState:
-        """
-        Process audio samples and return current speech state.
+    Args:
+        vad_state: Current VAD state
+        audio_16k: Audio samples at 16kHz as numpy array
         
-        Args:
-            audio: Float32 PCM audio at 16kHz, normalized to [-1, 1]
-            
-        Returns:
-            SpeechState indicating current detection status
-        """
-        # Accumulate audio in buffer
-        self._audio_buffer = np.concatenate([self._audio_buffer, audio])
-        
-        # Process complete windows
-        state = SpeechState.SILENCE if not self._is_speaking else SpeechState.SPEAKING
-        
-        while len(self._audio_buffer) >= self._window_size:
-            window = self._audio_buffer[:self._window_size]
-            self._audio_buffer = self._audio_buffer[self._window_size:]
-            
-            # Get speech probability from Silero VAD
-            prob = self._get_speech_probability(window)
-            
-            # Update state based on probability
-            state = self._update_state(prob)
-        
-        return state
+    Returns:
+        Tuple of (new_state, speech_started, speech_ended)
+    """
+    model = get_vad_model()
     
-    def _get_speech_probability(self, audio: np.ndarray) -> float:
-        """Run Silero VAD on audio window and return speech probability."""
-        # Convert to torch tensor
-        audio_tensor = torch.from_numpy(audio).float()
-        
-        # Run VAD
-        with torch.no_grad():
-            prob = self.model(audio_tensor, self.config.sample_rate).item()
-        
-        return prob
+    # Accumulate audio in buffer
+    buffer = vad_state.audio_buffer + tuple(audio_16k.tolist())
     
-    def _update_state(self, probability: float) -> SpeechState:
-        """
-        Update internal state based on speech probability.
+    # Track state changes
+    is_speaking = vad_state.is_speaking
+    speech_start_time = vad_state.speech_start_time
+    silence_start_time = vad_state.silence_start_time
+    speech_started = False
+    speech_ended = False
+    
+    # Process complete windows
+    while len(buffer) >= WINDOW_SIZE:
+        window = np.array(buffer[:WINDOW_SIZE], dtype=np.float32)
+        buffer = buffer[WINDOW_SIZE:]
         
-        Implements hysteresis with patience thresholds to avoid
-        rapid state transitions from momentary sounds or pauses.
-        """
-        current_time = time.time()
-        is_speech = probability > self.config.threshold
+        # Get speech probability
+        prob = _get_speech_probability(model, window)
         
-        if not self._is_speaking:
-            # Currently in silence, check for speech start
-            if is_speech:
-                if self._speech_start_time is None:
-                    self._speech_start_time = current_time
-                
-                # Check if speech has lasted long enough
-                speech_duration = current_time - self._speech_start_time
-                if speech_duration >= self.config.start_patience:
-                    self._is_speaking = True
-                    self._speech_start_time = None
-                    self._silence_start_time = None
-                    return SpeechState.SPEECH_START
-            else:
-                # Reset speech start timer
-                self._speech_start_time = None
-            
-            return SpeechState.SILENCE
+        # Update state
+        (is_speaking, speech_start_time, silence_start_time, 
+         started, ended) = _update_detection_state(
+            is_speaking, prob, speech_start_time, silence_start_time
+        )
         
+        # Track if any transition happened
+        if started:
+            speech_started = True
+        if ended:
+            speech_ended = True
+    
+    new_state = VADState(
+        is_speaking=is_speaking,
+        speech_start_time=speech_start_time,
+        silence_start_time=silence_start_time,
+        audio_buffer=buffer
+    )
+    
+    return new_state, speech_started, speech_ended
+
+
+def _get_speech_probability(model, audio: np.ndarray) -> float:
+    """Run Silero VAD on audio window."""
+    audio_tensor = torch.from_numpy(audio).float()
+    with torch.no_grad():
+        prob = model(audio_tensor, SAMPLE_RATE).item()
+    return prob
+
+
+def _update_detection_state(
+    is_speaking: bool,
+    probability: float,
+    speech_start_time: Optional[float],
+    silence_start_time: Optional[float],
+) -> Tuple[bool, Optional[float], Optional[float], bool, bool]:
+    """
+    Update detection state based on speech probability.
+    
+    Pure function implementing hysteresis with patience thresholds.
+    
+    Returns:
+        Tuple of (is_speaking, speech_start_time, silence_start_time, 
+                  speech_started, speech_ended)
+    """
+    now = time.time()
+    is_speech = probability > THRESHOLD
+    speech_started = False
+    speech_ended = False
+    
+    if not is_speaking:
+        # Currently in silence, check for speech start
+        if is_speech:
+            if speech_start_time is None:
+                speech_start_time = now
+            elif now - speech_start_time >= START_PATIENCE:
+                is_speaking = True
+                speech_started = True
+                speech_start_time = None
+                silence_start_time = None
         else:
-            # Currently speaking, check for speech end
-            if not is_speech:
-                if self._silence_start_time is None:
-                    self._silence_start_time = current_time
-                
-                # Check if silence has lasted long enough
-                silence_duration = current_time - self._silence_start_time
-                if silence_duration >= self.config.end_patience:
-                    self._is_speaking = False
-                    self._silence_start_time = None
-                    self._speech_start_time = None
-                    return SpeechState.SPEECH_END
-            else:
-                # Reset silence timer
-                self._silence_start_time = None
-            
-            return SpeechState.SPEAKING
+            speech_start_time = None
+    else:
+        # Currently speaking, check for speech end
+        if not is_speech:
+            if silence_start_time is None:
+                silence_start_time = now
+            elif now - silence_start_time >= END_PATIENCE:
+                is_speaking = False
+                speech_ended = True
+                silence_start_time = None
+                speech_start_time = None
+        else:
+            silence_start_time = None
     
-    @property
-    def is_speaking(self) -> bool:
-        """Whether the user is currently speaking."""
-        return self._is_speaking
+    return is_speaking, speech_start_time, silence_start_time, speech_started, speech_ended
