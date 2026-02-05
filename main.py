@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Voice Agent VAD System - Main Entry Point
+Voice Agent - Main Entry Point
 
 Usage:
     python main.py +1234567890
@@ -8,21 +8,23 @@ Usage:
 This will:
 1. Start the FastAPI server on the configured port
 2. Initiate an outbound call to the specified phone number
-3. Handle the call with VAD-based turn-taking
+3. Handle the call with:
+   - VAD-based turn-taking
+   - STT transcription (Deepgram)
+   - LLM response generation (OpenAI)
+   - TTS synthesis (ElevenLabs)
 """
 
 import os
 import sys
-import asyncio
 import logging
 import threading
 import time
-from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
 
-from src.server import app, init_response_audio
+from src.server import app
 from src.twilio_client import make_outbound_call
 
 # Load environment variables
@@ -34,6 +36,28 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def check_environment():
+    """Check that all required environment variables are set."""
+    required_vars = [
+        "TWILIO_ACCOUNT_SID",
+        "TWILIO_AUTH_TOKEN",
+        "TWILIO_PHONE_NUMBER",
+        "TWILIO_PUBLIC_URL",
+        "DEEPGRAM_API_KEY",
+        "OPENAI_API_KEY",
+        "ELEVENLABS_API_KEY",
+    ]
+    
+    missing = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing:
+        logger.error(f"Missing required environment variables: {', '.join(missing)}")
+        logger.error("Please check your .env file")
+        return False
+    
+    return True
 
 
 def start_server(port: int) -> None:
@@ -66,19 +90,12 @@ def main():
         print("Error: Phone number must be in E.164 format (start with +)")
         sys.exit(1)
     
-    # Get port from environment
-    port = int(os.getenv("PORT", "3040"))
-    
-    # Check for response audio
-    response_audio_path = Path(__file__).parent / "static" / "response.wav"
-    if not response_audio_path.exists():
-        print(f"Error: Response audio not found at {response_audio_path}")
-        print("Please create a response.wav file in the static/ directory")
+    # Check environment
+    if not check_environment():
         sys.exit(1)
     
-    # Load response audio
-    logger.info(f"Loading response audio from {response_audio_path}")
-    init_response_audio(str(response_audio_path))
+    # Get port from environment
+    port = int(os.getenv("PORT", "3040"))
     
     # Start server in background thread
     logger.info(f"Starting server on port {port}")

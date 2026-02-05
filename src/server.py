@@ -9,13 +9,11 @@ Provides endpoints:
 
 import os
 import logging
-from typing import Tuple
 
 from fastapi import FastAPI, WebSocket, Response
 from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
-from .audio import load_response_audio
 from .loop import run_call
 
 # Load environment variables
@@ -29,19 +27,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Create FastAPI app
-app = FastAPI(title="Voice Agent VAD System")
-
-# Pre-loaded response audio chunks (immutable tuple)
-_response_chunks: Tuple[str, ...] = ()
-
-
-def init_response_audio(audio_path: str) -> None:
-    """Load response audio at startup."""
-    global _response_chunks
-    logger.info(f"Loading response audio from {audio_path}")
-    chunks = load_response_audio(audio_path)
-    _response_chunks = tuple(chunks)
-    logger.info(f"Loaded {len(_response_chunks)} audio chunks")
+app = FastAPI(title="Voice Agent")
 
 
 @app.get("/health")
@@ -82,19 +68,18 @@ async def websocket_endpoint(websocket: WebSocket):
     """
     WebSocket endpoint for Twilio Media Streams.
     
-    Delegates to the main event loop.
+    Delegates to the main event loop which handles:
+    - VAD for speech detection
+    - STT for transcription
+    - LLM for response generation
+    - TTS for speech synthesis
     """
     await websocket.accept()
     logger.info("WebSocket connection accepted")
     
-    if not _response_chunks:
-        logger.error("Response audio not loaded")
-        await websocket.close()
-        return
-    
     try:
         # Run the main event loop
-        await run_call(websocket, _response_chunks)
+        await run_call(websocket)
     except Exception as e:
         logger.error(f"WebSocket handler error: {e}")
     finally:
