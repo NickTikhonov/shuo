@@ -115,12 +115,23 @@ class STTService:
     async def stop(self) -> None:
         """
         Close connection gracefully and send final transcript.
+        
+        Waits for Deepgram to return any pending transcriptions before closing.
         """
         if not self._running:
             return
         
-        self._running = False
         logger.info(f"STT: Sent {self._audio_bytes_sent} bytes of audio total")
+        
+        # Wait for Deepgram to return final results
+        # Poll for up to 2 seconds for transcript to arrive
+        wait_time = 0
+        max_wait = 2.0
+        while wait_time < max_wait and not self._transcript_parts:
+            await asyncio.sleep(0.1)
+            wait_time += 0.1
+        
+        self._running = False
         
         # Send accumulated transcript as final
         final_transcript = " ".join(self._transcript_parts).strip()
@@ -128,7 +139,7 @@ class STTService:
             logger.info(f"STT final transcript: {final_transcript}")
             await self._on_final(final_transcript)
         else:
-            logger.warning("STT: No transcript accumulated")
+            logger.warning("STT: No transcript accumulated after waiting")
         
         await self._cleanup()
         logger.info("STT connection closed")
