@@ -1,14 +1,13 @@
 """
-Pure state machine for the voice agent.
+Pure state machine for shuo.
 
 The update function is the heart of the system:
     (State, Event) -> (State, List[Action])
 
-No side effects, no I/O - just pure state transitions.
+No side effects, no I/O, no logging - just pure state transitions.
 This makes the entire system testable and predictable.
 """
 
-import logging
 from dataclasses import replace
 from typing import List, Tuple
 
@@ -30,8 +29,6 @@ from .types import (
 )
 from .audio import decode_mulaw, upsample_for_vad
 from .vad import process_audio, reset_model_state
-
-logger = logging.getLogger(__name__)
 
 
 def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
@@ -85,7 +82,6 @@ def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
 
 def handle_stream_start(state: AppState, stream_sid: str) -> Tuple[AppState, List[Action]]:
     """Handle new stream - reset everything."""
-    logger.info(f"Stream started: {stream_sid}")
     reset_model_state()
     
     new_state = replace(
@@ -105,7 +101,6 @@ def handle_stream_start(state: AppState, stream_sid: str) -> Tuple[AppState, Lis
 
 def handle_stream_stop(state: AppState) -> Tuple[AppState, List[Action]]:
     """Handle stream end - cancel everything."""
-    logger.info("Stream stopped")
     actions = []
     
     if state.stt_active:
@@ -163,7 +158,6 @@ def handle_media_listening(
     
     # Speech just started - begin STT
     if speech_started:
-        logger.info("User started speaking, starting STT")
         state = replace(state, stt_active=True, current_transcript="")
         actions.append(StartSTTAction())
     
@@ -173,7 +167,6 @@ def handle_media_listening(
     
     # Speech ended - stop STT and transition to PROCESSING
     if speech_ended and state.stt_active:
-        logger.info("User finished speaking, stopping STT")
         actions.append(StopSTTAction())
         # Note: We don't transition yet - wait for STTFinalEvent
     
@@ -208,8 +201,6 @@ def handle_interrupt(state: AppState) -> Tuple[AppState, List[Action]]:
     
     This is the critical path for responsiveness.
     """
-    logger.info("User interrupted, cancelling all services")
-    
     actions: List[Action] = []
     
     # Cancel any active services
@@ -243,9 +234,7 @@ def handle_interrupt(state: AppState) -> Tuple[AppState, List[Action]]:
 # =============================================================================
 
 def handle_stt_partial(state: AppState, text: str) -> Tuple[AppState, List[Action]]:
-    """Handle interim transcription - just update state for debugging."""
-    # Could show partial transcript for debugging
-    logger.debug(f"STT partial: {text}")
+    """Handle interim transcription - no action needed."""
     return state, []
 
 
@@ -255,10 +244,7 @@ def handle_stt_final(state: AppState, text: str) -> Tuple[AppState, List[Action]
     
     This is the transition from LISTENING to PROCESSING.
     """
-    logger.info(f"STT final: {text}")
-    
     if not text.strip():
-        logger.warning("Empty transcription, ignoring")
         return replace(state, stt_active=False), []
     
     # Build conversation history for LLM
@@ -312,8 +298,6 @@ def handle_llm_done(state: AppState) -> Tuple[AppState, List[Action]]:
     
     Tell TTS to synthesize any remaining buffered text.
     """
-    logger.info("LLM generation complete")
-    
     actions: List[Action] = []
     
     # Flush TTS to generate remaining audio
@@ -350,25 +334,15 @@ def handle_tts_audio(state: AppState, audio_base64: str) -> Tuple[AppState, List
     
     # First audio chunk - transition to SPEAKING
     if state.phase == Phase.PROCESSING:
-        logger.info("First TTS audio, starting playback")
         new_state = replace(state, phase=Phase.SPEAKING)
         actions.append(StartPlaybackAction())
-    
-    # Audio will be handled by the player via the effects layer
-    # The player receives audio directly from TTS service callbacks
     
     return new_state, actions
 
 
 def handle_tts_done(state: AppState) -> Tuple[AppState, List[Action]]:
     """Handle TTS completion."""
-    logger.info("TTS synthesis complete")
-    
     new_state = replace(state, tts_active=False)
-    
-    # If LLM is also done, we're just waiting for playback to finish
-    # PlaybackDoneEvent will handle the transition back to LISTENING
-    
     return new_state, []
 
 
@@ -384,8 +358,6 @@ def handle_playback_done(state: AppState) -> Tuple[AppState, List[Action]]:
     """
     if state.phase != Phase.SPEAKING:
         return state, []
-    
-    logger.info("Playback complete, returning to listening")
     
     new_state = replace(
         state,

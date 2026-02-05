@@ -1,13 +1,13 @@
 """
-The main event loop for the voice agent.
+The main event loop for shuo.
 
 This is the explicit, readable loop that drives the entire system:
 
     while connected:
-        event = receive()                    # I/O (from queue)
+        event = receive()                      # I/O (from queue)
         state, actions = update(state, event)  # PURE
         for action in actions:
-            execute(action)                  # I/O
+            execute(action)                    # I/O
 
 Events come from multiple sources:
 - Twilio WebSocket (audio packets)
@@ -22,7 +22,6 @@ All sources push to a shared async queue, which the main loop consumes.
 import json
 import base64
 import asyncio
-import logging
 from typing import Optional
 
 from fastapi import WebSocket
@@ -41,11 +40,11 @@ from .player import AudioPlayer
 from .services.stt import STTService
 from .services.llm import LLMService
 from .services.tts import TTSService
+from .log import Lifecycle, EventLogger, get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("shuo.loop")
 
 
-# @TODO: Move this and all Twilio stuff in an separate lib file
 def parse_twilio_message(data: dict) -> Optional[Event]:
     """
     Parse raw Twilio WebSocket message into typed Event.
@@ -55,7 +54,7 @@ def parse_twilio_message(data: dict) -> Optional[Event]:
     event_type = data.get("event")
     
     if event_type == "connected":
-        logger.info("Twilio connected")
+        Lifecycle.websocket_connected()
         return None
     
     elif event_type == "start":
@@ -88,6 +87,9 @@ async def run_call(websocket: WebSocket) -> None:
     4. Process events through pure update function
     5. Execute actions through effects executor
     """
+    # Event logger for this call
+    event_log = EventLogger(verbose=False)
+    
     # Shared event queue - all sources push here
     event_queue: asyncio.Queue[Event] = asyncio.Queue()
     
@@ -141,8 +143,7 @@ async def run_call(websocket: WebSocket) -> None:
                     if isinstance(event, StreamStopEvent):
                         break
         except Exception as e:
-            logger.error(f"Twilio reader error: {e}")
-            # Push stop event to gracefully exit
+            event_log.error("Twilio reader", e)
             await event_queue.put(StreamStopEvent())
     
     # --- Initialize State ---
@@ -156,11 +157,21 @@ async def run_call(websocket: WebSocket) -> None:
     # Start Twilio reader
     reader_task = asyncio.create_task(read_twilio())
     
-    logger.info("Starting call loop")
-    
     try:
         while True:
+            # ─────────────────────────────────────────────────────────────
+            # RECEIVE: Wait for event from any source
+            # ─────────────────────────────────────────────────────────────
             event = await event_queue.get()
+            
+            # Log lifecycle events
+            if isinstance(event, StreamStartEvent):
+                Lifecycle.stream_started(event.stream_sid)
+            elif isinstance(event, StreamStopEvent):
+                Lifecycle.stream_stopped()
+            
+            # Log the event
+            event_log.event(event)
             
             # Initialize player and executor when we get stream_sid
             if isinstance(event, StreamStartEvent) and player is None:
@@ -176,17 +187,31 @@ async def run_call(websocket: WebSocket) -> None:
                     tts=tts,
                 )
             
+            # ─────────────────────────────────────────────────────────────
+            # UPDATE: Pure state transition
+            # ─────────────────────────────────────────────────────────────
+            old_phase = state.phase
             state, actions = update(state, event)
+            
+            # Log phase transition
+            event_log.transition(old_phase, state.phase)
+            
+            # ─────────────────────────────────────────────────────────────
+            # EXECUTE: Perform side effects
+            # ─────────────────────────────────────────────────────────────
             if executor:
                 for action in actions:
+                    event_log.action(action)
                     await executor.execute(action)
             
+            # ─────────────────────────────────────────────────────────────
+            # CHECK: Exit condition
+            # ─────────────────────────────────────────────────────────────
             if isinstance(event, StreamStopEvent):
-                logger.info("Stream stopped, exiting loop")
                 break
                 
     except Exception as e:
-        logger.error(f"Call loop error: {e}")
+        event_log.error("Call loop", e)
         raise
     
     finally:
@@ -205,4 +230,4 @@ async def run_call(websocket: WebSocket) -> None:
         if player and player.is_playing:
             await player.stop_and_clear()
         
-        logger.info("Call loop ended")
+        Lifecycle.websocket_disconnected()

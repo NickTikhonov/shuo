@@ -1,30 +1,21 @@
 """
-Side effects for the voice agent.
+Side effects executor for shuo.
 
 This is the ONLY place where I/O happens.
-All functions here interact with the outside world (services, player).
+Maps Actions to service method calls.
 """
-
-import logging
-from typing import Optional
 
 from .types import (
     Action,
-    # STT Actions
     StartSTTAction, FeedSTTAction, StopSTTAction, CancelSTTAction,
-    # LLM Actions
     StartLLMAction, CancelLLMAction,
-    # TTS Actions
     StartTTSAction, FeedTTSAction, FlushTTSAction, CancelTTSAction,
-    # Playback Actions
     StartPlaybackAction, StopPlaybackAction,
 )
 from .player import AudioPlayer
 from .services.stt import STTService
 from .services.llm import LLMService
 from .services.tts import TTSService
-
-logger = logging.getLogger(__name__)
 
 
 class EffectsExecutor:
@@ -84,12 +75,7 @@ class EffectsExecutor:
         
         # --- Playback Actions ---
         elif isinstance(action, StartPlaybackAction):
-            # For the full pipeline, playback is managed differently
-            # Audio is fed directly from TTS to player
-            pass
+            pass  # Audio is fed directly from TTS to player
         
         elif isinstance(action, StopPlaybackAction):
             await self._player.stop_and_clear()
-        
-        else:
-            logger.warning(f"Unknown action type: {type(action)}")

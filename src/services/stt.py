@@ -1,25 +1,24 @@
 """
 Deepgram Speech-to-Text service using the official SDK.
 
-Based on working implementation using AsyncDeepgramClient.
-Uses the context manager pattern with event handlers.
+Uses AsyncDeepgramClient with the v1 listen WebSocket API.
 """
 
 import os
 import asyncio
-import logging
 from typing import Optional, Callable, Awaitable
 
 from deepgram import AsyncDeepgramClient
 
-logger = logging.getLogger(__name__)
+from ..log import ServiceLogger
+
+log = ServiceLogger("STT")
 
 
 class STTService:
     """
-    Deepgram streaming STT service using official SDK.
+    Deepgram streaming STT service.
     
-    Uses AsyncDeepgramClient with the v1 listen WebSocket API.
     Audio should be mulaw at 8kHz (Twilio format).
     """
     
@@ -28,11 +27,6 @@ class STTService:
         on_partial: Callable[[str], Awaitable[None]],
         on_final: Callable[[str], Awaitable[None]],
     ):
-        """
-        Args:
-            on_partial: Callback for interim transcriptions
-            on_final: Callback for final transcriptions (utterance complete)
-        """
         self._on_partial = on_partial
         self._on_final = on_final
         
@@ -41,36 +35,26 @@ class STTService:
         self._listener_task: Optional[asyncio.Task] = None
         self._running = False
         
-        # Accumulate transcript segments for final
         self._transcript_parts: list = []
         self._audio_bytes_sent = 0
         
-        # Get API key
         self._api_key = os.getenv("DEEPGRAM_API_KEY", "")
-        if not self._api_key:
-            logger.warning("DEEPGRAM_API_KEY not set")
     
     @property
     def is_active(self) -> bool:
-        """Whether STT is currently streaming."""
         return self._running and self._connection is not None
     
     async def start(self) -> None:
         """Open connection to Deepgram."""
         if self._running:
-            logger.warning("STT already running")
             return
         
-        # Reset state
         self._transcript_parts = []
         self._audio_bytes_sent = 0
         
         try:
-            # Create client
             self._client = AsyncDeepgramClient(api_key=self._api_key)
             
-            # Open connection using context manager
-            # We manually enter it here to keep the connection open
             self._cm = self._client.listen.v1.connect(
                 model="nova-2",
                 language="en-US",
@@ -84,20 +68,18 @@ class STTService:
             )
             self._connection = await self._cm.__aenter__()
             
-            # Register event handlers
             self._connection.on("message", self._on_message)
             self._connection.on("UtteranceEnd", self._on_utterance_end_event)
             self._connection.on("SpeechStarted", self._on_speech_started_event)
             self._connection.on("Error", self._on_error_event)
             
-            # Start listening for responses
             self._listener_task = asyncio.create_task(self._connection.start_listening())
             
             self._running = True
-            logger.info("STT connection opened")
+            log.connected()
             
         except Exception as e:
-            logger.error(f"Failed to connect to Deepgram: {e}")
+            log.error("Connection failed", e)
             await self._cleanup()
             raise
     
@@ -110,21 +92,16 @@ class STTService:
             await self._connection.send_media(audio_bytes)
             self._audio_bytes_sent += len(audio_bytes)
         except Exception as e:
-            logger.error(f"Error sending audio to Deepgram: {e}")
+            log.error("Send failed", e)
     
     async def stop(self) -> None:
-        """
-        Close connection gracefully and send final transcript.
-        
-        Waits for Deepgram to return any pending transcriptions before closing.
-        """
+        """Close connection gracefully and send final transcript."""
         if not self._running:
             return
         
-        logger.info(f"STT: Sent {self._audio_bytes_sent} bytes of audio total")
+        log.debug(f"Sent {self._audio_bytes_sent} bytes total")
         
         # Wait for Deepgram to return final results
-        # Poll for up to 2 seconds for transcript to arrive
         wait_time = 0
         max_wait = 2.0
         while wait_time < max_wait and not self._transcript_parts:
@@ -136,24 +113,20 @@ class STTService:
         # Send accumulated transcript as final
         final_transcript = " ".join(self._transcript_parts).strip()
         if final_transcript:
-            logger.info(f"STT final transcript: {final_transcript}")
             await self._on_final(final_transcript)
-        else:
-            logger.warning("STT: No transcript accumulated after waiting")
         
         await self._cleanup()
-        logger.info("STT connection closed")
+        log.disconnected()
     
     async def cancel(self) -> None:
         """Abort connection immediately without waiting for final."""
         self._running = False
         self._transcript_parts = []
         await self._cleanup()
-        logger.info("STT connection cancelled")
+        log.cancelled()
     
     async def _cleanup(self) -> None:
         """Clean up resources."""
-        # Cancel listener task
         if self._listener_task:
             self._listener_task.cancel()
             try:
@@ -162,7 +135,6 @@ class STTService:
                 pass
             self._listener_task = None
         
-        # Exit context manager
         if self._cm:
             try:
                 await self._cm.__aexit__(None, None, None)
@@ -173,27 +145,20 @@ class STTService:
         self._connection = None
         self._client = None
     
-    # --- Event Handlers ---
-    
     async def _on_message(self, result, *args, **kwargs):
         """Handle transcript result from Deepgram."""
         try:
-            # The SDK passes result as an object with channel attribute
-            # But the channel contains a list of alternatives, not an 'alternatives' attribute
             channel = getattr(result, 'channel', None)
             if not channel:
                 return
             
-            # Channel might have alternatives as an attribute or as a list
             alternatives = getattr(channel, 'alternatives', None)
             if alternatives is None:
-                # Try treating channel as the alternatives list
                 alternatives = channel if isinstance(channel, list) else None
             
             if not alternatives:
                 return
             
-            # Get first alternative
             alt = alternatives[0] if isinstance(alternatives, list) else alternatives
             transcript = getattr(alt, 'transcript', None) or (alt.get('transcript') if isinstance(alt, dict) else None)
             
@@ -201,28 +166,23 @@ class STTService:
                 return
             
             is_final = getattr(result, 'is_final', False)
-            speech_final = getattr(result, 'speech_final', False)
-            
-            logger.debug(f"STT {'final' if is_final else 'partial'}: {transcript}")
             
             if is_final:
-                # Accumulate final segments
                 self._transcript_parts.append(transcript)
             
-            # Fire callback
             await self._on_partial(transcript)
             
         except Exception as e:
-            logger.error(f"Error handling transcript: {e}", exc_info=True)
+            log.error("Message handling failed", e)
     
     async def _on_utterance_end_event(self, *args, **kwargs):
-        """Handle utterance end event from Deepgram."""
-        logger.debug("Deepgram: Utterance end detected")
+        """Handle utterance end event."""
+        pass
     
     async def _on_speech_started_event(self, *args, **kwargs):
-        """Handle speech started event from Deepgram."""
-        logger.debug("Deepgram: Speech started")
+        """Handle speech started event."""
+        pass
     
     async def _on_error_event(self, error, *args, **kwargs):
         """Handle error from Deepgram."""
-        logger.error(f"Deepgram error: {error}")
+        log.error(f"Deepgram error: {error}")

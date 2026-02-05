@@ -1,42 +1,33 @@
 """
-ElevenLabs Text-to-Speech service.
-
-WebSocket streaming API for real-time speech synthesis.
+ElevenLabs Text-to-Speech service with WebSocket streaming.
 """
 
 import os
 import json
-import base64
 import asyncio
-import logging
 from typing import Optional, Callable, Awaitable
 
 import websockets
 from websockets.client import WebSocketClientProtocol
 
-logger = logging.getLogger(__name__)
+from ..log import ServiceLogger
+
+log = ServiceLogger("TTS")
 
 
 class TTSService:
     """
     ElevenLabs streaming TTS service.
     
-    Manages a WebSocket connection for real-time synthesis.
     Sends text chunks, receives audio chunks via callback.
-    
     Audio is returned as base64-encoded mulaw at 8kHz for Twilio.
     """
     
     def __init__(
         self,
-        on_audio: Callable[[str], Awaitable[None]],  # base64 audio
+        on_audio: Callable[[str], Awaitable[None]],
         on_done: Callable[[], Awaitable[None]],
     ):
-        """
-        Args:
-            on_audio: Callback for each audio chunk (base64 encoded)
-            on_done: Callback when synthesis completes
-        """
         self._on_audio = on_audio
         self._on_done = on_done
         
@@ -45,24 +36,17 @@ class TTSService:
         self._running = False
         
         self._api_key = os.getenv("ELEVENLABS_API_KEY", "")
-        self._voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default: Rachel
-        
-        if not self._api_key:
-            logger.warning("ELEVENLABS_API_KEY not set")
+        self._voice_id = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")
     
     @property
     def is_active(self) -> bool:
-        """Whether TTS is currently active."""
         return self._running and self._ws is not None
     
     async def start(self) -> None:
         """Open WebSocket connection to ElevenLabs."""
         if self._running:
-            logger.warning("TTS already running")
             return
         
-        # ElevenLabs WebSocket URL
-        # - output_format=ulaw_8000 for Twilio compatibility
         url = (
             f"wss://api.elevenlabs.io/v1/text-to-speech/{self._voice_id}/stream-input?"
             f"model_id=eleven_turbo_v2_5&"
@@ -73,9 +57,8 @@ class TTSService:
             self._ws = await websockets.connect(url)
             self._running = True
             
-            # Send initial configuration
             init_message = {
-                "text": " ",  # Initial space to start the stream
+                "text": " ",
                 "voice_settings": {
                     "stability": 0.5,
                     "similarity_boost": 0.75,
@@ -85,10 +68,10 @@ class TTSService:
             await self._ws.send(json.dumps(init_message))
             
             self._receive_task = asyncio.create_task(self._receive_loop())
-            logger.info("TTS connection opened")
+            log.connected()
             
         except Exception as e:
-            logger.error(f"Failed to connect to ElevenLabs: {e}")
+            log.error("Connection failed", e)
             raise
     
     async def send(self, text: str) -> None:
@@ -103,7 +86,7 @@ class TTSService:
             }
             await self._ws.send(json.dumps(message))
         except Exception as e:
-            logger.error(f"Error sending text to ElevenLabs: {e}")
+            log.error("Send failed", e)
     
     async def flush(self) -> None:
         """Force synthesis of any buffered text."""
@@ -111,14 +94,13 @@ class TTSService:
             return
         
         try:
-            # Send empty string with flush flag to trigger generation
             message = {
                 "text": "",
                 "flush": True,
             }
             await self._ws.send(json.dumps(message))
         except Exception as e:
-            logger.error(f"Error flushing TTS: {e}")
+            log.error("Flush failed", e)
     
     async def stop(self) -> None:
         """Close connection gracefully after flushing."""
@@ -127,20 +109,19 @@ class TTSService:
         
         try:
             await self.flush()
-            # Give it a moment to process remaining audio
             await asyncio.sleep(0.2)
         except Exception as e:
-            logger.error(f"Error stopping TTS: {e}")
+            log.error("Stop failed", e)
         finally:
             await self._cleanup()
         
-        logger.info("TTS connection closed")
+        log.disconnected()
     
     async def cancel(self) -> None:
         """Abort connection immediately."""
         self._running = False
         await self._cleanup()
-        logger.info("TTS connection cancelled")
+        log.cancelled()
     
     async def _cleanup(self) -> None:
         """Clean up resources."""
@@ -169,10 +150,9 @@ class TTSService:
                     message = await self._ws.recv()
                     await self._handle_message(message)
                 except websockets.exceptions.ConnectionClosed:
-                    logger.info("ElevenLabs connection closed")
                     break
                 except Exception as e:
-                    logger.error(f"Error receiving from ElevenLabs: {e}")
+                    log.error("Receive failed", e)
                     break
         finally:
             if self._running:
@@ -184,20 +164,12 @@ class TTSService:
         try:
             data = json.loads(message)
             
-            # Check for audio data
             if "audio" in data and data["audio"]:
-                # Audio is already base64 encoded
                 audio_base64 = data["audio"]
                 await self._on_audio(audio_base64)
             
-            # Check for completion
             if data.get("isFinal", False):
-                logger.info("TTS synthesis complete")
                 await self._on_done()
             
-            # Check for errors
-            if "error" in data:
-                logger.error(f"ElevenLabs error: {data['error']}")
-                
         except json.JSONDecodeError:
-            logger.error(f"Invalid JSON from ElevenLabs: {message}")
+            log.error(f"Invalid JSON: {message[:100]}")

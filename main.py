@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Voice Agent - Main Entry Point
+shuo - Voice Agent Framework
 
 Usage:
     python main.py +1234567890
@@ -8,16 +8,11 @@ Usage:
 This will:
 1. Start the FastAPI server on the configured port
 2. Initiate an outbound call to the specified phone number
-3. Handle the call with:
-   - VAD-based turn-taking
-   - STT transcription (Deepgram)
-   - LLM response generation (OpenAI)
-   - TTS synthesis (ElevenLabs)
+3. Handle the call with VAD, STT, LLM, and TTS
 """
 
 import os
 import sys
-import logging
 import threading
 import time
 
@@ -26,19 +21,17 @@ from dotenv import load_dotenv
 
 from src.server import app
 from src.twilio_client import make_outbound_call
+from src.log import setup_logging, Lifecycle, get_logger
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Setup logging
+setup_logging()
+logger = get_logger("shuo")
 
 
-def check_environment():
+def check_environment() -> bool:
     """Check that all required environment variables are set."""
     required_vars = [
         "TWILIO_ACCOUNT_SID",
@@ -53,41 +46,37 @@ def check_environment():
     missing = [var for var in required_vars if not os.getenv(var)]
     
     if missing:
-        logger.error(f"Missing required environment variables: {', '.join(missing)}")
-        logger.error("Please check your .env file")
+        logger.error(f"Missing environment variables: {', '.join(missing)}")
         return False
     
     return True
 
 
 def start_server(port: int) -> None:
-    """Start the FastAPI server in a background thread."""
+    """Start the FastAPI server."""
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
         port=port,
-        log_level="info"
+        log_level="warning",  # Quiet uvicorn, we have our own logging
     )
     server = uvicorn.Server(config)
     server.run()
 
 
 def main():
-    """
-    Starts the server (main loop)
-    Creates an outbound call to the specified phone number.
-    """
+    """Main entry point."""
     # Check for phone number argument
     if len(sys.argv) < 2:
         print("Usage: python main.py +1234567890")
-        print("  Phone number must be in E.164 format (e.g., +1234567890)")
+        print("  Phone number must be in E.164 format")
         sys.exit(1)
     
     phone_number = sys.argv[1]
     
     # Validate phone number format
     if not phone_number.startswith("+"):
-        print("Error: Phone number must be in E.164 format (start with +)")
+        print("Error: Phone number must start with +")
         sys.exit(1)
     
     # Check environment
@@ -96,9 +85,10 @@ def main():
     
     # Get port from environment
     port = int(os.getenv("PORT", "3040"))
+    public_url = os.getenv("TWILIO_PUBLIC_URL", "")
     
     # Start server in background thread
-    logger.info(f"Starting server on port {port}")
+    Lifecycle.server_starting(port)
     server_thread = threading.Thread(
         target=start_server,
         args=(port,),
@@ -108,21 +98,21 @@ def main():
     
     # Wait for server to start
     time.sleep(2)
+    Lifecycle.server_ready(public_url)
     
     # Make outbound call
-    logger.info(f"Calling {phone_number}...")
+    Lifecycle.call_initiating(phone_number)
     try:
         call_sid = make_outbound_call(phone_number)
-        logger.info(f"Call initiated successfully - SID: {call_sid}")
-        logger.info("Waiting for call to connect...")
-        logger.info("Press Ctrl+C to end")
+        Lifecycle.call_initiated(call_sid)
+        logger.info("Waiting for call to connect... (Ctrl+C to end)")
         
         # Keep main thread alive
         while True:
             time.sleep(1)
             
     except KeyboardInterrupt:
-        logger.info("Shutting down...")
+        Lifecycle.shutdown()
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)

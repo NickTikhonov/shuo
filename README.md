@@ -1,172 +1,263 @@
-# Voice Agent VAD System
+# shuo 说
 
-A Voice Activity Detection (VAD) system built on top of Twilio phone calls. This is the foundation for building a complete voice agent.
+A real-time voice agent framework built from scratch. Makes phone calls, listens, thinks, and speaks.
+
+> **shuo** (说) — Mandarin for "to speak"
+
+## What It Does
+
+Call someone, have a conversation:
+
+```bash
+python main.py +1234567890
+```
+
+The system:
+1. **Listens** — Detects when you start/stop speaking (Silero VAD)
+2. **Transcribes** — Converts speech to text in real-time (Deepgram)
+3. **Thinks** — Generates a response (OpenAI GPT-4o-mini)
+4. **Speaks** — Synthesizes audio and plays it back (ElevenLabs)
+5. **Interrupts** — If you speak while it's talking, it stops immediately
+
+All with sub-second latency through aggressive streaming and pipelining.
 
 ## Architecture
 
-The system uses a **functional architecture** with an explicit event loop:
+Shuo uses a **functional, event-driven architecture** inspired by Elm/Redux:
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                          MAIN LOOP (loop.py)                           │
-│                                                                         │
-│   while connected:                                                      │
-│       event = receive()                    # I/O - WebSocket/Timer     │
-│       state, actions = update(state, event) # PURE - No side effects  │
-│       for action in actions:                                           │
-│           execute(action)                  # I/O - Send to Twilio     │
-└─────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                           TWILIO PHONE                              │
+│                      (User speaks into phone)                       │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                    Audio (mulaw 8kHz) via WebSocket
+                                   │
+                                   ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        MAIN EVENT LOOP                              │
+│                                                                     │
+│   while connected:                                                  │
+│       event = await queue.get()           # From any source         │
+│       state, actions = update(state, event)  # PURE FUNCTION       │
+│       for action in actions:                                        │
+│           await execute(action)           # Side effects            │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                    Events from multiple sources
+                                   │
+        ┌──────────────┬──────────┴──────────┬──────────────┐
+        ▼              ▼                     ▼              ▼
+   ┌─────────┐   ┌──────────┐         ┌──────────┐   ┌─────────┐
+   │  Twilio │   │ Deepgram │         │  OpenAI  │   │ Eleven  │
+   │WebSocket│   │   STT    │         │   LLM    │   │Labs TTS │
+   └─────────┘   └──────────┘         └──────────┘   └─────────┘
 ```
 
-### Why Functional?
+### The Key Insight
 
-- **Testable**: `update()` is pure - just call it with state and event, assert the result
-- **Debuggable**: Print state before/after any transition
-- **Extensible**: Add STT/LLM/TTS by adding new Events and Actions
-- **Predictable**: All state in one place, all side effects isolated
+**All business logic lives in a single pure function:**
+
+```python
+def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
+    ...
+```
+
+- **No I/O** — Just state in, state + actions out
+- **Testable** — 50 unit tests run in 1 second
+- **Debuggable** — Print state at any point
+- **Predictable** — Same input = same output
 
 ## State Machine
 
 ```
-                         ┌─────────────────────┐
-                         │                     │
-    ┌───────────────────►│     LISTENING       │◄────────────────┐
-    │                    │                     │                 │
-    │                    └──────────┬──────────┘                 │
-    │                               │                            │
-    │                    speech_end │                            │
-    │                               ▼                            │
-    │                    ┌─────────────────────┐                 │
-    │   interrupt        │                     │    playback     │
-    │   (speech_start)   │      PLAYING        │    complete     │
-    └────────────────────┤                     ├─────────────────┘
-                         └─────────────────────┘
+                    ┌─────────────────────┐
+     ┌─────────────►│     LISTENING       │◄────────────────┐
+     │              │   (VAD watching)    │                 │
+     │              └──────────┬──────────┘                 │
+     │                         │                            │
+     │              user stops │ speaking                   │
+     │              STT final  │ transcript                 │
+     │                         ▼                            │
+     │              ┌─────────────────────┐                 │
+     │              │    PROCESSING       │                 │
+     │   interrupt  │  (LLM + TTS streaming)               │  playback
+     │   (barge-in) └──────────┬──────────┘                 │  complete
+     │                         │                            │
+     │              first TTS  │ audio arrives              │
+     │                         ▼                            │
+     │              ┌─────────────────────┐                 │
+     └──────────────┤     SPEAKING        ├─────────────────┘
+                    │  (playing audio)    │
+                    └─────────────────────┘
 ```
+
+### Interrupt Handling (Barge-in)
+
+When the user speaks during PROCESSING or SPEAKING:
+1. Cancel LLM generation
+2. Cancel TTS synthesis
+3. Clear Twilio's audio buffer (instant silence)
+4. Start fresh STT session
+5. Transition to LISTENING
+
+This happens in ~50ms.
 
 ## Project Structure
 
 ```
-/vapi_clone
-├── README.md              # This file
-├── requirements.txt       # Python dependencies
-├── main.py                # CLI entry point
-├── static/
-│   └── response.wav       # Pre-recorded response audio
+shuo/
+├── main.py                 # Entry point - starts server, makes call
+├── requirements.txt        # Dependencies
+├── tests/
+│   ├── test_update.py      # 33 tests for state machine
+│   └── test_vad.py         # 17 tests for VAD logic
 └── src/
-    ├── types.py           # State, Events, Actions (dataclasses)
-    ├── vad.py             # Voice Activity Detection (pure functions)
-    ├── audio.py           # Audio codec utilities (pure functions)
-    ├── update.py          # State machine (pure function)
-    ├── effects.py         # Side effects (WebSocket I/O)
-    ├── loop.py            # Main event loop
-    ├── server.py          # FastAPI endpoints
-    └── twilio_client.py   # Outbound call initiation
+    ├── types.py            # State, Events, Actions (immutable dataclasses)
+    ├── update.py           # Pure state machine - THE BRAIN
+    ├── loop.py             # Main event loop - THE HEART
+    ├── effects.py          # Side effect executor - THE HANDS
+    ├── player.py           # Audio playback manager
+    ├── vad.py              # Voice Activity Detection (Silero)
+    ├── audio.py            # Codec utilities (mulaw ↔ PCM)
+    ├── server.py           # FastAPI endpoints
+    ├── twilio_client.py    # Outbound call initiation
+    └── services/
+        ├── stt.py          # Deepgram streaming STT
+        ├── llm.py          # OpenAI streaming LLM
+        └── tts.py          # ElevenLabs streaming TTS
 ```
 
-## Key Files Explained
+## How It Works
 
-### `types.py` - The Data Model
-All state is immutable dataclasses:
-- `AppState`: Complete application state
-- `Event`: Things that happen (MediaEvent, StreamStartEvent, etc.)
-- `Action`: Side effects to perform (SendAudioAction, ClearBufferAction, etc.)
+### 1. Audio Flow
 
-### `update.py` - The Brain
-Pure function: `(State, Event) -> (State, List[Action])`
-- No I/O, no side effects
-- All business logic in one place
-- Easy to test and reason about
+```
+Twilio (mulaw 8kHz) 
+    → decode to PCM 
+    → upsample to 16kHz 
+    → Silero VAD 
+    → speech probability
+```
 
-### `loop.py` - The Heart
-Explicit event loop:
-1. RECEIVE event from WebSocket or timer
-2. UPDATE state (call pure function)
-3. EXECUTE actions (perform side effects)
+### 2. Turn Detection
 
-### `effects.py` - The Boundary
-The ONLY place with side effects:
-- Send audio to Twilio
-- Send clear message
-- Manage playback timer
+VAD uses **hysteresis** to prevent flickering:
+- `START_PATIENCE = 250ms` — Must speak for 250ms before we "believe" it
+- `END_PATIENCE = 700ms` — Must be silent for 700ms before turn ends
 
-## Agent Rules
+### 3. Pipeline Streaming
 
-1. **Functional Core, Imperative Shell**: Pure logic in `update.py`, I/O in `effects.py`
-2. **Immutable State**: All dataclasses are `frozen=True`
-3. **Explicit Loop**: No hidden callbacks, everything flows through the main loop
-4. **Clean Python**: Type hints, small functions, meaningful names
+For minimum latency, everything streams in parallel:
+
+```
+User speaks → STT transcribes (streaming)
+                    ↓
+           STT final transcript
+                    ↓
+              LLM generates (streaming tokens)
+                    ↓ (each token)
+              TTS synthesizes (streaming audio)
+                    ↓ (each chunk)
+              Player sends to Twilio
+```
+
+LLM tokens are forwarded to TTS immediately — we don't wait for the full response.
+
+### 4. Events & Actions
+
+**Events** (inputs to the system):
+- `MediaEvent` — Audio from Twilio
+- `STTFinalEvent` — Transcription complete
+- `LLMTokenEvent` — Token from GPT
+- `TTSAudioEvent` — Audio chunk from ElevenLabs
+- `PlaybackDoneEvent` — Finished playing
+
+**Actions** (outputs/side effects):
+- `StartSTTAction`, `FeedSTTAction`, `StopSTTAction`
+- `StartLLMAction`, `CancelLLMAction`
+- `StartTTSAction`, `FeedTTSAction`, `FlushTTSAction`
+- `StartPlaybackAction`, `StopPlaybackAction`
 
 ## Setup
 
 ### Prerequisites
 
 - Python 3.9+
-- Twilio account with a phone number
-- ngrok for local development
+- [ngrok](https://ngrok.com/) for exposing local server
+- API keys for: Twilio, Deepgram, OpenAI, ElevenLabs
 
 ### Installation
 
 ```bash
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Environment Variables
+### Configuration
 
 Create `.env`:
-```
-PORT=3040
-TWILIO_ACCOUNT_SID=your_account_sid
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=+1234567890
-TWILIO_PUBLIC_URL=https://your-subdomain.ngrok-free.app
-```
-
-## Usage
 
 ```bash
+PORT=3040
+
+# Twilio
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_PHONE_NUMBER=+1234567890
+TWILIO_PUBLIC_URL=https://your-subdomain.ngrok-free.app
+
+# AI Services
+DEEPGRAM_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ELEVENLABS_API_KEY=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM
+```
+
+### Running
+
+```bash
+# Start ngrok (in another terminal)
+ngrok http 3040
+
+# Update TWILIO_PUBLIC_URL in .env with ngrok URL
+
+# Make a call
 python main.py +1234567890
 ```
 
-This will:
-1. Start the FastAPI server on port 3040
-2. Call the specified phone number
-3. When you answer, speak something and stop
-4. The pre-recorded response will play
-5. If you speak during playback, it stops immediately
+## Testing
 
-## Extending to Full Voice Agent
+The pure functional core is fully testable without mocking:
 
-The architecture is designed for easy extension:
+```bash
+# Run all tests
+python -m pytest tests/ -v
 
-```python
-# Add new phases
-class Phase(Enum):
-    LISTENING = auto()
-    TRANSCRIBING = auto()  # NEW: STT processing
-    THINKING = auto()       # NEW: LLM generating
-    SYNTHESIZING = auto()   # NEW: TTS generating
-    PLAYING = auto()
-
-# Add new events
-@dataclass(frozen=True)
-class TranscriptReadyEvent:
-    text: str
-
-@dataclass(frozen=True)
-class LLMResponseEvent:
-    text: str
-
-# Add new actions
-@dataclass(frozen=True)
-class TranscribeAction:
-    audio_chunks: Tuple[bytes, ...]
-
-@dataclass(frozen=True)
-class GenerateResponseAction:
-    transcript: str
-    history: Tuple[Turn, ...]
+# 50 tests in ~1 second
 ```
 
-The `update()` function grows with new match cases, but stays pure.
-The `execute()` function handles new action types with async service calls.
+Tests cover:
+- State transitions (LISTENING → PROCESSING → SPEAKING)
+- Interrupt handling (barge-in cancels everything)
+- Conversation history management
+- VAD hysteresis logic
+- Edge cases and error handling
+
+## Design Principles
+
+1. **Functional Core, Imperative Shell**  
+   All logic in pure `update()`, all I/O in `execute()`
+
+2. **Immutable State**  
+   All dataclasses are `frozen=True` — state is never mutated
+
+3. **Single Event Queue**  
+   All sources (Twilio, STT, LLM, TTS) push to one queue
+
+4. **Explicit Everything**  
+   No hidden callbacks, no implicit state, no magic
+
+## License
+
+MIT
