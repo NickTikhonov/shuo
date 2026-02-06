@@ -1,13 +1,13 @@
 """
-Agent turn -- self-contained LLM -> TTS -> Player pipeline.
+Agent -- self-contained LLM -> TTS -> Player pipeline.
 
 Encapsulates the entire agent response lifecycle.
 Owns conversation history across turns.
 
-    start(transcript) -> add to history -> LLM -> TTS -> Player -> Twilio
-    reset()           -> cancel all, keep history
+    start_turn(transcript) -> add to history -> LLM -> TTS -> Player -> Twilio
+    cancel_turn()          -> cancel all, keep history
 
-TTS connections are managed by TTSPool (see tts_pool.py).
+TTS connections are managed by TTSPool (see services/tts_pool.py).
 """
 
 import asyncio
@@ -22,7 +22,7 @@ from .services.tts_pool import TTSPool
 from .services.player import AudioPlayer
 from .log import ServiceLogger
 
-log = ServiceLogger("AgentTurn")
+log = ServiceLogger("Agent")
 
 
 def _ms_since(t0: float) -> int:
@@ -30,7 +30,7 @@ def _ms_since(t0: float) -> int:
     return int((time.monotonic() - t0) * 1000)
 
 
-class AgentTurn:
+class Agent:
     """
     Self-contained agent response pipeline.
 
@@ -57,7 +57,7 @@ class AgentTurn:
             on_done=self._on_llm_done,
         )
 
-        # Active per-turn services (set during start, cleared on reset)
+        # Active per-turn services (set during start, cleared on cancel)
         self._tts: Optional[TTSService] = None
         self._player: Optional[AudioPlayer] = None
         self._active = False
@@ -71,7 +71,7 @@ class AgentTurn:
         self._got_first_audio = False
 
     @property
-    def is_active(self) -> bool:
+    def is_turn_active(self) -> bool:
         return self._active
 
     @property
@@ -81,10 +81,10 @@ class AgentTurn:
 
     # ── Turn Lifecycle ──────────────────────────────────────────────
 
-    async def start(self, transcript: str) -> None:
+    async def start_turn(self, transcript: str) -> None:
         """Start a new agent turn."""
         if self._active:
-            await self.reset()
+            await self.cancel_turn()
 
         self._active = True
         self._t0 = time.monotonic()
@@ -111,7 +111,7 @@ class AgentTurn:
         tts_ms = int((self._t_tts_conn - self._t0) * 1000)
         log.info(f"Turn started  (TTS {tts_ms}ms = {tts_ms}ms setup)")
 
-    async def reset(self) -> None:
+    async def cancel_turn(self) -> None:
         """Cancel current turn, preserve history."""
         if not self._active:
             return
@@ -131,12 +131,12 @@ class AgentTurn:
                 await self._player.stop_and_clear()
             self._player = None
 
-        log.info(f"Turn reset at +{elapsed}ms (history preserved)")
+        log.info(f"Turn cancelled at +{elapsed}ms (history preserved)")
 
     async def cleanup(self) -> None:
         """Final cleanup when call ends."""
         if self._active:
-            await self.reset()
+            await self.cancel_turn()
 
     # ── Internal Callbacks ──────────────────────────────────────────
 

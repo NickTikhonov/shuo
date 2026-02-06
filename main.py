@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 from shuo.server import app
 from shuo.services.twilio_client import make_outbound_call
-from shuo.log import setup_logging, Lifecycle, get_logger
+from shuo.log import setup_logging, Logger, get_logger
 
 # Load environment variables
 load_dotenv()
@@ -88,7 +88,7 @@ def main():
     public_url = os.getenv("TWILIO_PUBLIC_URL", "")
     
     # Start server in background thread
-    Lifecycle.server_starting(port)
+    Logger.server_starting(port)
     server_thread = threading.Thread(
         target=start_server,
         args=(port,),
@@ -98,13 +98,13 @@ def main():
     
     # Wait for server to start
     time.sleep(2)
-    Lifecycle.server_ready(public_url)
+    Logger.server_ready(public_url)
     
     # Make outbound call
-    Lifecycle.call_initiating(phone_number)
+    Logger.call_initiating(phone_number)
     try:
         call_sid = make_outbound_call(phone_number)
-        Lifecycle.call_initiated(call_sid)
+        Logger.call_initiated(call_sid)
         logger.info("Waiting for call to connect... (Ctrl+C to end)")
         
         # Keep main thread alive
@@ -112,7 +112,7 @@ def main():
             time.sleep(1)
             
     except KeyboardInterrupt:
-        Lifecycle.shutdown()
+        Logger.shutdown()
     except Exception as e:
         logger.error(f"Error: {e}")
         sys.exit(1)

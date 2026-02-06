@@ -11,7 +11,7 @@ import os
 from fastapi import FastAPI, WebSocket, Response
 from fastapi.responses import PlainTextResponse
 
-from .loop import run_call
+from .conversation import run_conversation_over_twilio
 from .log import get_logger
 
 logger = get_logger("shuo.server")
@@ -56,6 +56,6 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
     try:
-        await run_call(websocket)
+        await run_conversation_over_twilio(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")

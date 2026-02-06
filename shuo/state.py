@@ -1,7 +1,7 @@
 """
 Pure state machine for shuo.
 
-The update function is the heart of the system:
+The process_event function is the heart of the system:
     (State, Event) -> (State, List[Action])
 
 With Deepgram Flux handling turn detection, this is now
@@ -19,7 +19,7 @@ from .types import (
 )
 
 
-def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
+def process_event(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
     """
     Pure state machine: (State, Event) -> (State, Actions)
 

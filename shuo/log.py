@@ -3,8 +3,8 @@ Centralized logging for shuo.
 
 Provides:
 - Configured console logger with colors
-- EventLogger for consistent event logging
-- Lifecycle logging helpers
+- Logger for consistent event/lifecycle/action logging
+- ServiceLogger for individual services
 """
 
 import logging
@@ -98,18 +98,24 @@ def get_logger(name: str) -> logging.Logger:
 
 
 # =============================================================================
-# LIFECYCLE LOGGING
+# LOGGER (unified lifecycle + event + action logging)
 # =============================================================================
 
-class Lifecycle:
-    """Lifecycle event logging with colors."""
+class Logger:
+    """
+    Unified logger for shuo.
+
+    Class methods  -- lifecycle events (server, call, websocket, stream)
+    Instance methods -- event/action/transition logging in the conversation loop
+    """
 
     _logger = logging.getLogger("shuo")
 
+    # ── Lifecycle (class methods) ────────────────────────────────────
+
     @classmethod
     def server_starting(cls, port: int) -> None:
-        msg = _c(C.CYAN, "Server starting on port " + str(port))
-        cls._logger.info("\U0001F680 " + msg)
+        cls._logger.info("\U0001F680 " + _c(C.CYAN, "Server starting on port " + str(port)))
 
     @classmethod
     def server_ready(cls, url: str) -> None:
@@ -134,29 +140,13 @@ class Lifecycle:
         cls._logger.info("\U0001F50C " + _c(C.DIM, "WebSocket disconnected"))
 
     @classmethod
-    def stream_started(cls, stream_sid: str) -> None:
-        cls._logger.info(
-            _c(C.GREEN, "\u25B6  Stream started") + " " + _c(C.DIM, "SID: " + stream_sid[:8] + "...")
-        )
-
-    @classmethod
-    def stream_stopped(cls) -> None:
-        cls._logger.info("\u23F9  " + _c(C.DIM, "Stream stopped"))
-
-    @classmethod
     def shutdown(cls) -> None:
         cls._logger.info("\U0001F44B " + _c(C.DIM, "Shutting down"))
 
-
-# =============================================================================
-# EVENT LOGGING
-# =============================================================================
-
-class EventLogger:
-    """Logs events in a consistent, readable format with colors."""
+    # ── Instance methods (conversation loop) ─────────────────────────
 
     def __init__(self, verbose: bool = False):
-        self._logger = logging.getLogger("shuo.events")
+        self._events_logger = logging.getLogger("shuo.events")
         self._verbose = verbose
 
     def event(self, event: Event) -> None:
@@ -165,17 +155,25 @@ class EventLogger:
         if isinstance(event, MediaEvent):
             if self._verbose:
                 size = len(event.audio_bytes)
-                self._logger.debug(_c(C.DIM, "\u2190 MediaEvent (" + str(size) + " bytes)"))
+                self._events_logger.debug(_c(C.DIM, "\u2190 MediaEvent (" + str(size) + " bytes)"))
             return
 
-        if isinstance(event, (StreamStartEvent, StreamStopEvent)):
-            return  # Handled by Lifecycle
+        if isinstance(event, StreamStartEvent):
+            self._events_logger.info(
+                _c(C.GREEN, "\u25B6  Stream started") + " " +
+                _c(C.DIM, "SID: " + event.stream_sid[:8] + "...")
+            )
+            return
+
+        if isinstance(event, StreamStopEvent):
+            self._events_logger.info("\u23F9  " + _c(C.DIM, "Stream stopped"))
+            return
 
         if isinstance(event, FluxEndOfTurnEvent):
             text = event.transcript
             if len(text) > 60:
                 text = text[:57] + "..."
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.GREEN, "\u2190") + " " +
                 _c(C.BRIGHT_BLUE, "Flux") + " " +
                 _c(C.GREEN, "EndOfTurn") + " " +
@@ -184,7 +182,7 @@ class EventLogger:
             return
 
         if isinstance(event, FluxStartOfTurnEvent):
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.BRIGHT_RED, "\u26A1") + " " +
                 _c(C.BRIGHT_BLUE, "Flux") + " " +
                 _c(C.BRIGHT_RED, "StartOfTurn") + " " +
@@ -193,7 +191,7 @@ class EventLogger:
             return
 
         if isinstance(event, AgentTurnDoneEvent):
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.GREEN, "\u2190") + " " +
                 _c(C.DIM, "Agent turn done")
             )
@@ -205,53 +203,47 @@ class EventLogger:
         if isinstance(action, FeedFluxAction):
             if self._verbose:
                 size = len(action.audio_bytes)
-                self._logger.debug(_c(C.DIM, "\u2192 FeedFlux (" + str(size) + " bytes)"))
+                self._events_logger.debug(_c(C.DIM, "\u2192 FeedFlux (" + str(size) + " bytes)"))
             return
 
         if isinstance(action, StartAgentTurnAction):
             msg = action.transcript
             if len(msg) > 40:
                 msg = msg[:37] + "..."
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.YELLOW, "\u2192") + " " +
                 _c(C.YELLOW, "Start") + " " +
-                _c(C.BRIGHT_CYAN, "AgentTurn") + " " +
+                _c(C.BRIGHT_CYAN, "Agent") + " " +
                 _quote(msg, C.DIM)
             )
             return
 
         if isinstance(action, ResetAgentTurnAction):
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.YELLOW, "\u2192") + " " +
                 _c(C.BRIGHT_RED, "Reset") + " " +
-                _c(C.BRIGHT_CYAN, "AgentTurn")
+                _c(C.BRIGHT_CYAN, "Agent")
             )
             return
 
     def transition(self, old_phase: Phase, new_phase: Phase) -> None:
         """Log a phase transition (magenta)."""
         if old_phase != new_phase:
-            self._logger.info(
+            self._events_logger.info(
                 _c(C.MAGENTA, "\u25C6") + " " +
                 _c(C.DIM, old_phase.name) + " " +
                 _c(C.MAGENTA, "\u2192") + " " +
                 _c(C.BRIGHT_MAGENTA, new_phase.name)
             )
 
-    def interrupt(self) -> None:
-        """Log an interrupt (red)."""
-        self._logger.info(
-            _c(C.BRIGHT_RED, "\u26A1 INTERRUPT") + " " + _c(C.DIM, "(user spoke)")
-        )
-
     def error(self, msg: str, exc: Optional[Exception] = None) -> None:
         """Log an error (red)."""
         if exc:
-            self._logger.error(
+            self._events_logger.error(
                 _c(C.RED, "\u2717 " + msg + ":") + " " + _c(C.DIM, str(exc))
             )
         else:
-            self._logger.error(_c(C.RED, "\u2717 " + msg))
+            self._events_logger.error(_c(C.RED, "\u2717 " + msg))
 
 
 # =============================================================================
@@ -259,14 +251,14 @@ class EventLogger:
 # =============================================================================
 
 class ServiceLogger:
-    """Logger for individual services (Flux, LLM, TTS, Player, AgentTurn)."""
+    """Logger for individual services (Flux, LLM, TTS, Player, Agent)."""
 
     COLORS = {
         "Flux": C.BRIGHT_BLUE,
         "LLM": C.BRIGHT_MAGENTA,
         "TTS": C.BRIGHT_CYAN,
         "Player": C.WHITE,
-        "AgentTurn": C.BRIGHT_GREEN,
+        "Agent": C.BRIGHT_GREEN,
     }
 
     def __init__(self, service_name: str):

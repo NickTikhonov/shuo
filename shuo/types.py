@@ -4,7 +4,7 @@ Type definitions for shuo.
 All state, events, and actions are immutable dataclasses.
 Minimal -- only what the main loop needs to route decisions.
 
-Conversation history lives in AgentTurn, not in AppState.
+Conversation history lives in Agent, not in AppState.
 """
 
 from dataclasses import dataclass
@@ -19,7 +19,7 @@ from typing import Optional, Union, List
 class Phase(Enum):
     """Current phase of the conversation."""
     LISTENING = auto()    # Waiting for user / user speaking
-    RESPONDING = auto()   # AgentTurn active (LLM -> TTS -> Playback)
+    RESPONDING = auto()   # Agent active (LLM -> TTS -> Playback)
 
 
 @dataclass(frozen=True)
@@ -27,7 +27,7 @@ class AppState:
     """
     Application state -- just routing information.
 
-    Conversation history is owned by AgentTurn, not tracked here.
+    Conversation history is owned by Agent, not tracked here.
     """
     phase: Phase = Phase.LISTENING
     stream_sid: Optional[str] = None
