@@ -13,11 +13,11 @@ python main.py +1234567890
 ```
 
 The system:
-1. **Listens** — Detects when you start/stop speaking (Silero VAD)
-2. **Transcribes** — Converts speech to text in real-time (Deepgram)
-3. **Thinks** — Generates a response (OpenAI GPT-4o-mini)
-4. **Speaks** — Synthesizes audio and plays it back (ElevenLabs)
-5. **Interrupts** — If you speak while it's talking, it stops immediately
+1. **Listens** — Streams audio to Deepgram Flux, which handles both speech recognition and turn detection
+2. **Detects turns** — Flux emits `StartOfTurn` (user began speaking) and `EndOfTurn` (user finished, with transcript)
+3. **Thinks** — Generates a response via OpenAI GPT-4o-mini (streaming)
+4. **Speaks** — Synthesizes audio via ElevenLabs (streaming) and plays it back
+5. **Interrupts** — If you speak while it's talking, Flux fires `StartOfTurn` and the agent stops immediately
 
 All with sub-second latency through aggressive streaming and pipelining.
 
@@ -41,23 +41,35 @@ Shuo uses a **functional, event-driven architecture** inspired by Elm/Redux:
 │       event = await queue.get()           # From any source         │
 │       state, actions = update(state, event)  # PURE FUNCTION       │
 │       for action in actions:                                        │
-│           await execute(action)           # Side effects            │
+│           dispatch(action)                # Side effects            │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
-                                   │
-                    Events from multiple sources
-                                   │
-        ┌──────────────┬──────────┴──────────┬──────────────┐
-        ▼              ▼                     ▼              ▼
-   ┌─────────┐   ┌──────────┐         ┌──────────┐   ┌─────────┐
-   │  Twilio │   │ Deepgram │         │  OpenAI  │   │ Eleven  │
-   │WebSocket│   │   STT    │         │   LLM    │   │Labs TTS │
-   └─────────┘   └──────────┘         └──────────┘   └─────────┘
+               │                                     │
+     Events from Flux                     Actions dispatched to
+               │                                     │
+        ┌──────┴──────┐              ┌──────────────┴──────────────┐
+        ▼             ▼              ▼                             ▼
+   ┌─────────┐  ┌──────────┐  ┌──────────┐                 ┌──────────┐
+   │  Flux   │  │ AgentTurn│  │   Flux   │                 │AgentTurn │
+   │StartOf  │  │  Done    │  │ FeedAudio│                 │Start/    │
+   │Turn     │  │          │  │          │                 │Reset     │
+   └─────────┘  └──────────┘  └──────────┘                 └──────────┘
+```
+
+### Two Key Abstractions
+
+**1. Deepgram Flux** (`src/flux.py`) — Always-on STT + turn detection. Replaces local VAD and separate STT. A single persistent WebSocket receives all audio and emits turn events.
+
+**2. AgentTurn** (`src/agent_turn.py`) — Self-contained response pipeline. Encapsulates LLM → TTS → Player as a single cancellable unit. Owns conversation history.
+
+```
+AgentTurn.start(transcript)  → add to history → LLM → TTS → Player → Twilio
+AgentTurn.reset()            → cancel all, keep history
 ```
 
 ### The Key Insight
 
-**All business logic lives in a single pure function:**
+**All business logic lives in a single pure function (~30 lines):**
 
 ```python
 def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
@@ -65,66 +77,61 @@ def update(state: AppState, event: Event) -> Tuple[AppState, List[Action]]:
 ```
 
 - **No I/O** — Just state in, state + actions out
-- **Testable** — 50 unit tests run in 1 second
+- **Testable** — 24 unit tests run in 0.03 seconds
 - **Debuggable** — Print state at any point
 - **Predictable** — Same input = same output
 
 ## State Machine
 
 ```
-                    ┌─────────────────────┐
-     ┌─────────────►│     LISTENING       │◄────────────────┐
-     │              │   (VAD watching)    │                 │
-     │              └──────────┬──────────┘                 │
-     │                         │                            │
-     │              user stops │ speaking                   │
-     │              STT final  │ transcript                 │
-     │                         ▼                            │
-     │              ┌─────────────────────┐                 │
-     │              │    PROCESSING       │                 │
-     │   interrupt  │  (LLM + TTS streaming)               │  playback
-     │   (barge-in) └──────────┬──────────┘                 │  complete
-     │                         │                            │
-     │              first TTS  │ audio arrives              │
-     │                         ▼                            │
-     │              ┌─────────────────────┐                 │
-     └──────────────┤     SPEAKING        ├─────────────────┘
-                    │  (playing audio)    │
-                    └─────────────────────┘
+              ┌─────────────────────────┐
+   ┌──────────►       LISTENING         │◄──────────────┐
+   │          │  (Flux receiving audio) │                │
+   │          └───────────┬─────────────┘                │
+   │                      │                              │
+   │           Flux       │ EndOfTurn                    │ AgentTurn
+   │           StartOf    │ (with transcript)            │ Done
+   │           Turn       │                              │ (playback
+   │           (barge-in) │                              │  complete)
+   │                      ▼                              │
+   │          ┌─────────────────────────┐                │
+   └──────────┤       RESPONDING        ├────────────────┘
+              │  (LLM → TTS → Player)  │
+              └─────────────────────────┘
 ```
+
+Only two phases. Only three actions. The entire state machine is trivial because Flux handles all the complexity of turn detection.
 
 ### Interrupt Handling (Barge-in)
 
-When the user speaks during PROCESSING or SPEAKING:
+When Flux detects `StartOfTurn` during RESPONDING:
 1. Cancel LLM generation
 2. Cancel TTS synthesis
 3. Clear Twilio's audio buffer (instant silence)
-4. Start fresh STT session
-5. Transition to LISTENING
+4. Transition to LISTENING
 
-This happens in ~50ms.
+History is preserved — the next turn has full conversation context.
 
 ## Project Structure
 
 ```
 shuo/
-├── main.py                 # Entry point - starts server, makes call
+├── main.py                 # Entry point — starts server, makes call
 ├── requirements.txt        # Dependencies
 ├── tests/
-│   ├── test_update.py      # 33 tests for state machine
-│   └── test_vad.py         # 17 tests for VAD logic
+│   └── test_update.py      # 24 tests for state machine
 └── src/
     ├── types.py            # State, Events, Actions (immutable dataclasses)
-    ├── update.py           # Pure state machine - THE BRAIN
-    ├── loop.py             # Main event loop - THE HEART
-    ├── effects.py          # Side effect executor - THE HANDS
+    ├── update.py           # Pure state machine — THE BRAIN (~30 lines)
+    ├── loop.py             # Main event loop — THE HEART
+    ├── flux.py             # Deepgram Flux — always-on STT + turns
+    ├── agent_turn.py       # Response pipeline — LLM → TTS → Player
     ├── player.py           # Audio playback manager
-    ├── vad.py              # Voice Activity Detection (Silero)
     ├── audio.py            # Codec utilities (mulaw ↔ PCM)
     ├── server.py           # FastAPI endpoints
     ├── twilio_client.py    # Outbound call initiation
+    ├── log.py              # Colored logging
     └── services/
-        ├── stt.py          # Deepgram streaming STT
         ├── llm.py          # OpenAI streaming LLM
         └── tts.py          # ElevenLabs streaming TTS
 ```
@@ -134,33 +141,31 @@ shuo/
 ### 1. Audio Flow
 
 ```
-Twilio (mulaw 8kHz) 
-    → decode to PCM 
-    → upsample to 16kHz 
-    → Silero VAD 
-    → speech probability
+Twilio (mulaw 8kHz) → Flux (always-on WebSocket) → Turn events
 ```
+
+No local audio processing needed. Flux handles everything server-side.
 
 ### 2. Turn Detection
 
-VAD uses **hysteresis** to prevent flickering:
-- `START_PATIENCE = 250ms` — Must speak for 250ms before we "believe" it
-- `END_PATIENCE = 700ms` — Must be silent for 700ms before turn ends
+Flux uses a conversational speech recognition model built for voice agents:
+- `StartOfTurn` — User began speaking (triggers barge-in if agent is talking)
+- `EndOfTurn` — User finished speaking (includes full transcript)
+
+No local VAD, no hysteresis tuning, no resampling.
 
 ### 3. Pipeline Streaming
 
 For minimum latency, everything streams in parallel:
 
 ```
-User speaks → STT transcribes (streaming)
-                    ↓
-           STT final transcript
-                    ↓
-              LLM generates (streaming tokens)
-                    ↓ (each token)
-              TTS synthesizes (streaming audio)
-                    ↓ (each chunk)
-              Player sends to Twilio
+Flux EndOfTurn (transcript)
+        ↓
+  LLM generates (streaming tokens)
+        ↓ (each token)
+  TTS synthesizes (streaming audio)
+        ↓ (each chunk)
+  Player sends to Twilio
 ```
 
 LLM tokens are forwarded to TTS immediately — we don't wait for the full response.
@@ -169,16 +174,14 @@ LLM tokens are forwarded to TTS immediately — we don't wait for the full respo
 
 **Events** (inputs to the system):
 - `MediaEvent` — Audio from Twilio
-- `STTFinalEvent` — Transcription complete
-- `LLMTokenEvent` — Token from GPT
-- `TTSAudioEvent` — Audio chunk from ElevenLabs
-- `PlaybackDoneEvent` — Finished playing
+- `FluxEndOfTurnEvent` — User finished speaking (with transcript)
+- `FluxStartOfTurnEvent` — User started speaking (barge-in)
+- `AgentTurnDoneEvent` — Agent finished playing response
 
 **Actions** (outputs/side effects):
-- `StartSTTAction`, `FeedSTTAction`, `StopSTTAction`
-- `StartLLMAction`, `CancelLLMAction`
-- `StartTTSAction`, `FeedTTSAction`, `FlushTTSAction`
-- `StartPlaybackAction`, `StopPlaybackAction`
+- `FeedFluxAction` — Send audio to Deepgram Flux
+- `StartAgentTurnAction` — Start the LLM → TTS → Player pipeline
+- `ResetAgentTurnAction` — Cancel everything and clear Twilio buffer
 
 ## Setup
 
@@ -186,7 +189,7 @@ LLM tokens are forwarded to TTS immediately — we don't wait for the full respo
 
 - Python 3.9+
 - [ngrok](https://ngrok.com/) for exposing local server
-- API keys for: Twilio, Deepgram, OpenAI, ElevenLabs
+- API keys for: Twilio, Deepgram (with Flux access), OpenAI, ElevenLabs
 
 ### Installation
 
@@ -234,29 +237,32 @@ The pure functional core is fully testable without mocking:
 # Run all tests
 python -m pytest tests/ -v
 
-# 50 tests in ~1 second
+# 24 tests in ~0.03 seconds
 ```
 
 Tests cover:
-- State transitions (LISTENING → PROCESSING → SPEAKING)
-- Interrupt handling (barge-in cancels everything)
-- Conversation history management
-- VAD hysteresis logic
-- Edge cases and error handling
+- State transitions (LISTENING ↔ RESPONDING)
+- Interrupt handling (barge-in resets agent)
+- Audio routing (always forwarded to Flux)
+- Complete conversation flows
+- Edge cases and state immutability
 
 ## Design Principles
 
-1. **Functional Core, Imperative Shell**  
-   All logic in pure `update()`, all I/O in `execute()`
+1. **Functional Core, Imperative Shell**
+   All logic in pure `update()`, all I/O in services
 
-2. **Immutable State**  
+2. **Two Abstractions**
+   Flux (input) and AgentTurn (output) — that's the whole system
+
+3. **Immutable State**
    All dataclasses are `frozen=True` — state is never mutated
 
-3. **Single Event Queue**  
-   All sources (Twilio, STT, LLM, TTS) push to one queue
+4. **Single Event Queue**
+   All sources (Twilio, Flux, AgentTurn) push to one queue
 
-4. **Explicit Everything**  
-   No hidden callbacks, no implicit state, no magic
+5. **Conversation History in AgentTurn**
+   History survives interrupts — `reset()` cancels pipeline but keeps context
 
 ## License
 

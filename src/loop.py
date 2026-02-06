@@ -7,16 +7,12 @@ This is the explicit, readable loop that drives the entire system:
         event = receive()                      # I/O (from queue)
         state, actions = update(state, event)  # PURE
         for action in actions:
-            execute(action)                    # I/O
+            dispatch(action)                   # I/O
 
-Events come from multiple sources:
+Events come from:
 - Twilio WebSocket (audio packets)
-- STT Service (transcriptions)
-- LLM Service (tokens)
-- TTS Service (audio chunks)
-- Player (playback complete)
-
-All sources push to a shared async queue, which the main loop consumes.
+- Deepgram Flux (turn events)
+- AgentTurn (playback complete)
 """
 
 import json
@@ -27,110 +23,79 @@ from typing import Optional
 from fastapi import WebSocket
 
 from .types import (
-    AppState, Phase, VADState,
+    AppState,
     Event, StreamStartEvent, StreamStopEvent, MediaEvent,
-    STTPartialEvent, STTFinalEvent,
-    LLMTokenEvent, LLMDoneEvent,
-    TTSAudioEvent, TTSDoneEvent,
-    PlaybackDoneEvent,
+    FluxStartOfTurnEvent, FluxEndOfTurnEvent, AgentTurnDoneEvent,
+    FeedFluxAction, StartAgentTurnAction, ResetAgentTurnAction,
 )
 from .update import update
-from .effects import EffectsExecutor
-from .player import AudioPlayer
-from .services.stt import STTService
-from .services.llm import LLMService
-from .services.tts import TTSService
+from .flux import FluxService
+from .agent_turn import AgentTurn
 from .log import Lifecycle, EventLogger, get_logger
 
 logger = get_logger("shuo.loop")
 
 
 def parse_twilio_message(data: dict) -> Optional[Event]:
-    """
-    Parse raw Twilio WebSocket message into typed Event.
-    
-    Returns None for events we don't care about.
-    """
+    """Parse raw Twilio WebSocket message into typed Event."""
     event_type = data.get("event")
-    
+
     if event_type == "connected":
         Lifecycle.websocket_connected()
         return None
-    
+
     elif event_type == "start":
         start_data = data.get("start", {})
         stream_sid = start_data.get("streamSid")
         if stream_sid:
             return StreamStartEvent(stream_sid=stream_sid)
-    
+
     elif event_type == "media":
         media_data = data.get("media", {})
         payload = media_data.get("payload", "")
         if payload:
             audio_bytes = base64.b64decode(payload)
             return MediaEvent(audio_bytes=audio_bytes)
-    
+
     elif event_type == "stop":
         return StreamStopEvent()
-    
+
     return None
 
 
 async def run_call(websocket: WebSocket) -> None:
     """
     Main event loop for a single call.
-    
-    This coordinates all services and manages the event-driven architecture:
+
     1. Create shared event queue
-    2. Create services with callbacks that push to queue
-    3. Start Twilio reader task
-    4. Process events through pure update function
-    5. Execute actions through effects executor
+    2. Create Flux service (always-on STT + turn detection)
+    3. Start Twilio reader
+    4. On StreamStart, create AgentTurn
+    5. Process events through pure update function
+    6. Dispatch actions inline
     """
-    # Event logger for this call
     event_log = EventLogger(verbose=False)
-    
-    # Shared event queue - all sources push here
     event_queue: asyncio.Queue[Event] = asyncio.Queue()
-    
-    # Will be initialized when we get stream_sid
-    player: Optional[AudioPlayer] = None
-    executor: Optional[EffectsExecutor] = None
-    
-    # --- Service Callbacks (push events to queue) ---
-    
-    async def on_stt_partial(text: str) -> None:
-        await event_queue.put(STTPartialEvent(text=text))
-    
-    async def on_stt_final(text: str) -> None:
-        await event_queue.put(STTFinalEvent(text=text))
-    
-    async def on_llm_token(token: str) -> None:
-        await event_queue.put(LLMTokenEvent(token=token))
-    
-    async def on_llm_done() -> None:
-        await event_queue.put(LLMDoneEvent())
-    
-    async def on_tts_audio(audio_base64: str) -> None:
-        await event_queue.put(TTSAudioEvent(audio_base64=audio_base64))
-        # Also send audio to player directly
-        if player:
-            await player.send_chunk(audio_base64)
-    
-    async def on_tts_done() -> None:
-        await event_queue.put(TTSDoneEvent())
-        # Mark TTS done so player knows no more chunks coming
-        if player:
-            player.mark_tts_done()
-    
-    # --- Create Services ---
-    
-    stt = STTService(on_partial=on_stt_partial, on_final=on_stt_final)
-    llm = LLMService(on_token=on_llm_token, on_done=on_llm_done)
-    tts = TTSService(on_audio=on_tts_audio, on_done=on_tts_done)
-    
-    # --- Twilio WebSocket Reader Task ---
-    
+
+    agent_turn: Optional[AgentTurn] = None
+
+    # ── Flux Callbacks (push events to queue) ───────────────────────
+
+    async def on_flux_end_of_turn(transcript: str) -> None:
+        await event_queue.put(FluxEndOfTurnEvent(transcript=transcript))
+
+    async def on_flux_start_of_turn() -> None:
+        await event_queue.put(FluxStartOfTurnEvent())
+
+    # ── Create Flux Service ─────────────────────────────────────────
+
+    flux = FluxService(
+        on_end_of_turn=on_flux_end_of_turn,
+        on_start_of_turn=on_flux_start_of_turn,
+    )
+
+    # ── Twilio WebSocket Reader ─────────────────────────────────────
+
     async def read_twilio() -> None:
         """Background task to read from Twilio and push to event queue."""
         try:
@@ -145,89 +110,72 @@ async def run_call(websocket: WebSocket) -> None:
         except Exception as e:
             event_log.error("Twilio reader", e)
             await event_queue.put(StreamStopEvent())
-    
-    # --- Initialize State ---
-    
-    state = AppState(
-        phase=Phase.LISTENING,
-        vad=VADState(),
-        stream_sid=None,
-    )
-    
-    # Start Twilio reader
+
+    # ── Initialize ──────────────────────────────────────────────────
+
+    state = AppState()
     reader_task = asyncio.create_task(read_twilio())
-    
+
     try:
         while True:
-            # ─────────────────────────────────────────────────────────────
-            # RECEIVE: Wait for event from any source
-            # ─────────────────────────────────────────────────────────────
+            # ─── RECEIVE ────────────────────────────────────────────
             event = await event_queue.get()
-            
-            # Log lifecycle events
+
+            # Lifecycle logging
             if isinstance(event, StreamStartEvent):
                 Lifecycle.stream_started(event.stream_sid)
             elif isinstance(event, StreamStopEvent):
                 Lifecycle.stream_stopped()
-            
-            # Log the event
+
             event_log.event(event)
-            
-            # Initialize player and executor when we get stream_sid
-            if isinstance(event, StreamStartEvent) and player is None:
-                player = AudioPlayer(
+
+            # Initialize services on stream start
+            if isinstance(event, StreamStartEvent):
+                await flux.start()
+                agent_turn = AgentTurn(
                     websocket=websocket,
                     stream_sid=event.stream_sid,
-                    on_done=lambda: event_queue.put_nowait(PlaybackDoneEvent()),
+                    on_done=lambda: event_queue.put_nowait(AgentTurnDoneEvent()),
                 )
-                executor = EffectsExecutor(
-                    player=player,
-                    stt=stt,
-                    llm=llm,
-                    tts=tts,
-                )
-            
-            # ─────────────────────────────────────────────────────────────
-            # UPDATE: Pure state transition
-            # ─────────────────────────────────────────────────────────────
+
+            # ─── UPDATE (pure) ──────────────────────────────────────
             old_phase = state.phase
             state, actions = update(state, event)
-            
-            # Log phase transition
             event_log.transition(old_phase, state.phase)
-            
-            # ─────────────────────────────────────────────────────────────
-            # EXECUTE: Perform side effects
-            # ─────────────────────────────────────────────────────────────
-            if executor:
-                for action in actions:
-                    event_log.action(action)
-                    await executor.execute(action)
-            
-            # ─────────────────────────────────────────────────────────────
-            # CHECK: Exit condition
-            # ─────────────────────────────────────────────────────────────
+
+            # ─── DISPATCH (side effects) ────────────────────────────
+            for action in actions:
+                event_log.action(action)
+
+                if isinstance(action, FeedFluxAction):
+                    await flux.send(action.audio_bytes)
+
+                elif isinstance(action, StartAgentTurnAction):
+                    if agent_turn:
+                        await agent_turn.start(action.transcript)
+
+                elif isinstance(action, ResetAgentTurnAction):
+                    if agent_turn:
+                        await agent_turn.reset()
+
+            # ─── EXIT CHECK ─────────────────────────────────────────
             if isinstance(event, StreamStopEvent):
                 break
-                
+
     except Exception as e:
         event_log.error("Call loop", e)
         raise
-    
+
     finally:
-        # Cleanup
         reader_task.cancel()
         try:
             await reader_task
         except asyncio.CancelledError:
             pass
-        
-        # Cancel any active services
-        await stt.cancel()
-        await llm.cancel()
-        await tts.cancel()
-        
-        if player and player.is_playing:
-            await player.stop_and_clear()
-        
+
+        if agent_turn:
+            await agent_turn.cleanup()
+
+        await flux.stop()
+
         Lifecycle.websocket_disconnected()
