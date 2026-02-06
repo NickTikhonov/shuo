@@ -68,7 +68,10 @@ class ColorFormatter(logging.Formatter):
     """Custom formatter with colors and clean timestamp."""
 
     def format(self, record: logging.LogRecord) -> str:
-        time_str = _c(C.DIM, self.formatTime(record, "%H:%M:%S"))
+        # Millisecond-precision timestamps for latency debugging
+        ms = int(record.msecs)
+        ts = self.formatTime(record, "%H:%M:%S") + f".{ms:03d}"
+        time_str = _c(C.DIM, ts)
         return time_str + " \u2502 " + record.getMessage()
 
 

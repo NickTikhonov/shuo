@@ -13,7 +13,7 @@ from typing import Optional, Callable, Awaitable
 
 from deepgram import AsyncDeepgramClient
 
-from .log import ServiceLogger
+from ..log import ServiceLogger
 
 log = ServiceLogger("Flux")
 

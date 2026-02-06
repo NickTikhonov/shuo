@@ -9,13 +9,13 @@ is a simple conversation controller.
 import pytest
 from dataclasses import replace
 
-from src.types import (
+from shuo.types import (
     AppState, Phase,
     StreamStartEvent, StreamStopEvent, MediaEvent,
     FluxStartOfTurnEvent, FluxEndOfTurnEvent, AgentTurnDoneEvent,
     FeedFluxAction, StartAgentTurnAction, ResetAgentTurnAction,
 )
-from src.update import update
+from shuo.update import update
 
 
 # =============================================================================

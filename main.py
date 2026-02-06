@@ -19,9 +19,9 @@ import time
 import uvicorn
 from dotenv import load_dotenv
 
-from src.server import app
-from src.twilio_client import make_outbound_call
-from src.log import setup_logging, Lifecycle, get_logger
+from shuo.server import app
+from shuo.services.twilio_client import make_outbound_call
+from shuo.log import setup_logging, Lifecycle, get_logger
 
 # Load environment variables
 load_dotenv()

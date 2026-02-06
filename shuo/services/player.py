@@ -11,7 +11,7 @@ from typing import List, Optional, Callable
 
 from fastapi import WebSocket
 
-from .log import ServiceLogger
+from ..log import ServiceLogger
 
 log = ServiceLogger("Player")
 

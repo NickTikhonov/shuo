@@ -29,7 +29,8 @@ from .types import (
     FeedFluxAction, StartAgentTurnAction, ResetAgentTurnAction,
 )
 from .update import update
-from .flux import FluxService
+from .services.flux import FluxService
+from .services.tts_pool import TTSPool
 from .agent_turn import AgentTurn
 from .log import Lifecycle, EventLogger, get_logger
 
@@ -78,6 +79,7 @@ async def run_call(websocket: WebSocket) -> None:
     event_queue: asyncio.Queue[Event] = asyncio.Queue()
 
     agent_turn: Optional[AgentTurn] = None
+    tts_pool = TTSPool(pool_size=1, ttl=8.0)
 
     # ── Flux Callbacks (push events to queue) ───────────────────────
 
@@ -132,10 +134,12 @@ async def run_call(websocket: WebSocket) -> None:
             # Initialize services on stream start
             if isinstance(event, StreamStartEvent):
                 await flux.start()
+                await tts_pool.start()
                 agent_turn = AgentTurn(
                     websocket=websocket,
                     stream_sid=event.stream_sid,
                     on_done=lambda: event_queue.put_nowait(AgentTurnDoneEvent()),
+                    tts_pool=tts_pool,
                 )
 
             # ─── UPDATE (pure) ──────────────────────────────────────
@@ -176,6 +180,7 @@ async def run_call(websocket: WebSocket) -> None:
         if agent_turn:
             await agent_turn.cleanup()
 
+        await tts_pool.stop()
         await flux.stop()
 
         Lifecycle.websocket_disconnected()

@@ -41,6 +41,15 @@ class TTSService:
     @property
     def is_active(self) -> bool:
         return self._running and self._ws is not None
+
+    def bind(
+        self,
+        on_audio: Callable[[str], Awaitable[None]],
+        on_done: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Rebind callbacks (used by connection pool to assign per-turn handlers)."""
+        self._on_audio = on_audio
+        self._on_done = on_done
     
     async def start(self) -> None:
         """Open WebSocket connection to ElevenLabs."""
