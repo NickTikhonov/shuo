@@ -32,6 +32,7 @@ from .services.flux import FluxService
 from .services.tts_pool import TTSPool
 from .services.twilio_client import parse_twilio_message
 from .agent import Agent
+from .tracer import Tracer
 from .log import Logger, get_logger
 
 logger = get_logger("shuo.conversation")
@@ -50,9 +51,11 @@ async def run_conversation_over_twilio(websocket: WebSocket) -> None:
     """
     event_log = Logger(verbose=False)
     event_queue: asyncio.Queue[Event] = asyncio.Queue()
+    tracer = Tracer()
 
     agent: Optional[Agent] = None
     tts_pool = TTSPool(pool_size=1, ttl=8.0)
+    stream_sid: Optional[str] = None
 
     # ── Flux Callbacks (push events to queue) ───────────────────────
 
@@ -100,6 +103,7 @@ async def run_conversation_over_twilio(websocket: WebSocket) -> None:
 
             # Initialize services on stream start
             if isinstance(event, StreamStartEvent):
+                stream_sid = event.stream_sid
                 await flux.start()
                 await tts_pool.start()
                 agent = Agent(
@@ -107,6 +111,7 @@ async def run_conversation_over_twilio(websocket: WebSocket) -> None:
                     stream_sid=event.stream_sid,
                     on_done=lambda: event_queue.put_nowait(AgentTurnDoneEvent()),
                     tts_pool=tts_pool,
+                    tracer=tracer,
                 )
 
             # ─── UPDATE (pure) ──────────────────────────────────────
@@ -148,5 +153,9 @@ async def run_conversation_over_twilio(websocket: WebSocket) -> None:
 
         await tts_pool.stop()
         await flux.stop()
+
+        # Save trace
+        call_id = stream_sid or "unknown"
+        tracer.save(call_id)
 
         Logger.websocket_disconnected()
