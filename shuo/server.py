@@ -16,6 +16,7 @@ from fastapi import FastAPI, WebSocket, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .conversation import run_conversation_over_twilio
+from .services.twilio_client import make_outbound_call
 from .log import get_logger
 
 logger = get_logger("shuo.server")
@@ -63,6 +64,23 @@ async def latest_trace():
 
     data = json.loads(traces[0].read_text())
     return JSONResponse(data)
+
+
+@app.get("/call/{phone_number:path}")
+async def trigger_call(phone_number: str):
+    """
+    Initiate an outbound call.
+
+    Usage:
+        curl https://your-server/call/+1234567890
+    """
+    if not phone_number.startswith("+"):
+        phone_number = f"+{phone_number}"
+    try:
+        call_sid = make_outbound_call(phone_number)
+        return {"status": "calling", "to": phone_number, "call_sid": call_sid}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.websocket("/ws")
