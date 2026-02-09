@@ -65,6 +65,13 @@ class TTSService:
         try:
             self._ws = await websockets.connect(url)
             self._running = True
+
+            # Log ElevenLabs region (expect "Netherlands" from DE)
+            # websockets v15: response headers live on ws.response.headers
+            resp = getattr(self._ws, "response", None)
+            hdrs = getattr(resp, "headers", {}) if resp else {}
+            region = hdrs.get("x-region", "unknown")
+            log.info(f"Region: {region}")
             
             init_message = {
                 "text": " ",

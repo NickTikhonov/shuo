@@ -33,7 +33,7 @@ def make_outbound_call(to_number: str) -> str:
     if not all([account_sid, auth_token, from_number, public_url]):
         raise ValueError("Missing required Twilio environment variables")
     
-    client = Client(account_sid, auth_token)
+    client = Client(account_sid, auth_token, edge="frankfurt", region="us1")
     
     twiml_url = f"{public_url}/twiml"
     

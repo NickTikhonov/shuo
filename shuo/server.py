@@ -43,7 +43,7 @@ async def twiml():
     twiml_response = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
     <Connect>
-        <Stream url="{ws_url}" />
+        <Stream url="{ws_url}" track="inbound_track" />
     </Connect>
 </Response>"""
     

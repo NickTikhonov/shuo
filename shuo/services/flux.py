@@ -11,7 +11,7 @@ import os
 import asyncio
 from typing import Optional, Callable, Awaitable
 
-from deepgram import AsyncDeepgramClient
+from deepgram import AsyncDeepgramClient, DeepgramClientEnvironment
 
 from ..log import ServiceLogger
 
@@ -53,7 +53,15 @@ class FluxService:
             return
 
         try:
-            self._client = AsyncDeepgramClient(api_key=self._api_key)
+            deepgram_eu = DeepgramClientEnvironment(
+                base="wss://api.eu.deepgram.com",
+                production="wss://api.eu.deepgram.com",
+                agent="wss://agent.eu.deepgram.com",
+            )
+            self._client = AsyncDeepgramClient(
+                api_key=self._api_key,
+                environment=deepgram_eu,
+            )
 
             self._cm = self._client.listen.v2.connect(
                 model="flux-general-en",
