@@ -41,6 +41,7 @@ def make_outbound_call(to_number: str) -> str:
         to=to_number,
         from_=from_number,
         url=twiml_url,
+        record=True,
     )
     
     return call.sid

@@ -20,10 +20,10 @@ from matplotlib.ticker import FuncFormatter
 # ── Theme ────────────────────────────────────────────────────────────
 
 SPAN_COLORS: Dict[str, str] = {
-    "tts_pool": "#78909C",   # blue-gray
-    "llm":      "#5C6BC0",   # indigo
-    "tts":      "#26C6DA",   # cyan
-    "player":   "#66BB6A",   # green
+    "tts_pool": "#6C7A89",   # slate gray
+    "llm":      "#2D5BE3",   # bold blue
+    "tts":      "#E8442A",   # red-orange
+    "player":   "#1BAA5C",   # emerald green
 }
 
 SPAN_LABELS: Dict[str, str] = {
@@ -35,8 +35,8 @@ SPAN_LABELS: Dict[str, str] = {
 
 MARKER_STYLES: Dict[str, Tuple[str, str]] = {
     # name -> (color, short label)
-    "llm_first_token": ("#FF7043", "TTFT"),
-    "tts_first_audio": ("#AB47BC", "First audio"),
+    "llm_first_token": ("#F5A623", "TTFT"),
+    "tts_first_audio": ("#9B2FAE", "First audio"),
 }
 
 CANCELLED_ALPHA = 0.45
@@ -86,7 +86,7 @@ def render_trace(data: dict, save_path: Optional[str] = None) -> None:
         return
 
     num_turns = len(turns)
-    fig_height = max(3.5, num_turns * 2.8 + 0.8)
+    fig_height = max(2.0, num_turns * 1.4 + 0.8)
 
     fig, axes = plt.subplots(
         num_turns, 1,
@@ -96,7 +96,7 @@ def render_trace(data: dict, save_path: Optional[str] = None) -> None:
     )
 
     fig.suptitle(
-        f"shuo trace — {_short_id(call_id)}",
+        f"latency trace — {_short_id(call_id)}",
         fontsize=14,
         fontweight="bold",
         fontfamily="monospace",
@@ -104,7 +104,7 @@ def render_trace(data: dict, save_path: Optional[str] = None) -> None:
 
     for idx, turn in enumerate(turns):
         ax = axes[idx, 0]
-        _render_turn(ax, turn, idx + 1)
+        _render_turn(ax, turn)
 
     # ── Shared legend ────────────────────────────────────────────────
     legend_handles = []
@@ -126,7 +126,7 @@ def render_trace(data: dict, save_path: Optional[str] = None) -> None:
         frameon=False,
     )
 
-    plt.subplots_adjust(top=0.91, bottom=0.07, hspace=0.55)
+    plt.subplots_adjust(top=0.91, bottom=0.07, hspace=0.85)
 
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -135,7 +135,7 @@ def render_trace(data: dict, save_path: Optional[str] = None) -> None:
         plt.show()
 
 
-def _render_turn(ax: plt.Axes, turn: dict, turn_num: int) -> None:
+def _render_turn(ax: plt.Axes, turn: dict) -> None:
     """Render a single turn on one subplot."""
     spans = turn.get("spans", [])
     markers = turn.get("markers", [])
@@ -148,7 +148,7 @@ def _render_turn(ax: plt.Axes, turn: dict, turn_num: int) -> None:
         display_text = display_text[:57] + "…"
 
     ax.set_title(
-        f"Turn {turn_num}:  \"{display_text}\"",
+        f"\"{display_text}\"",
         fontsize=10,
         loc="left",
         pad=10,
@@ -276,7 +276,7 @@ def _render_turn(ax: plt.Axes, turn: dict, turn_num: int) -> None:
     ax.set_xlabel("ms from turn start", fontsize=8, color="#999")
     ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ms))
     ax.invert_yaxis()
-    ax.set_xlim(left=0)
+    ax.set_xlim(left=0, right=5000)
     ax.grid(axis="x", alpha=0.2, linestyle=":")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
