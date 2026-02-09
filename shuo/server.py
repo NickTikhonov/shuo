@@ -3,13 +3,17 @@ FastAPI server for shuo.
 
 Endpoints:
 - GET /health - Health check
-- POST /twiml - Returns TwiML for Twilio to connect WebSocket
+- GET/POST /twiml - Returns TwiML for Twilio to connect WebSocket
 - WebSocket /ws - Media stream endpoint
+- GET /trace/latest - Returns the most recent call trace as JSON
 """
 
+import json
 import os
+from pathlib import Path
+
 from fastapi import FastAPI, WebSocket, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 from .conversation import run_conversation_over_twilio
 from .log import get_logger
@@ -25,7 +29,7 @@ async def health():
     return {"status": "ok"}
 
 
-@app.post("/twiml")
+@app.api_route("/twiml", methods=["GET", "POST"])
 async def twiml():
     """
     Return TwiML instructing Twilio to connect a WebSocket stream.
@@ -44,6 +48,21 @@ async def twiml():
 </Response>"""
     
     return Response(content=twiml_response, media_type="application/xml")
+
+
+@app.get("/trace/latest")
+async def latest_trace():
+    """Return the most recent call trace as JSON."""
+    trace_dir = Path("/tmp/shuo")
+    if not trace_dir.exists():
+        return JSONResponse({"error": "No traces found"}, status_code=404)
+
+    traces = sorted(trace_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not traces:
+        return JSONResponse({"error": "No traces found"}, status_code=404)
+
+    data = json.loads(traces[0].read_text())
+    return JSONResponse(data)
 
 
 @app.websocket("/ws")

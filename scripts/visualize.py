@@ -10,6 +10,7 @@ Usage:
 
 import sys
 import json
+import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -52,6 +53,12 @@ MIN_VISIBLE_MS = 2.0
 def load_trace(path: Path) -> dict:
     with open(path) as f:
         return json.load(f)
+
+
+def fetch_trace(url: str) -> dict:
+    """Fetch trace JSON from a remote URL."""
+    with urllib.request.urlopen(url) as resp:
+        return json.loads(resp.read())
 
 
 def find_latest_trace() -> Optional[Path]:
@@ -297,8 +304,20 @@ def main() -> None:
         save_path = args[save_idx + 1]
         args = args[:save_idx] + args[save_idx + 2:]
 
-    if args:
+    if args and args[0].startswith(("http://", "https://")):
+        url = args[0]
+        print(f"Fetching trace from {url}")
+        try:
+            data = fetch_trace(url)
+        except Exception as e:
+            print(f"Failed to fetch trace: {e}")
+            sys.exit(1)
+    elif args:
         trace_path = Path(args[0])
+        if not trace_path.exists():
+            print(f"File not found: {trace_path}")
+            sys.exit(1)
+        data = load_trace(trace_path)
     else:
         trace_path = find_latest_trace()
         if trace_path:
@@ -306,13 +325,9 @@ def main() -> None:
         else:
             print("No trace files found in /tmp/shuo/")
             print("Usage: python scripts/visualize.py /tmp/shuo/<call_id>.json")
+            print("       python scripts/visualize.py https://your-server/trace/latest")
             sys.exit(1)
-
-    if not trace_path.exists():
-        print(f"File not found: {trace_path}")
-        sys.exit(1)
-
-    data = load_trace(trace_path)
+        data = load_trace(trace_path)
     render_trace(data, save_path=save_path)
 
 

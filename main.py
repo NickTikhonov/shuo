@@ -3,12 +3,11 @@
 shuo - Voice Agent Framework
 
 Usage:
-    python main.py +1234567890
+    python main.py                  # server-only mode (inbound calls)
+    python main.py +1234567890      # outbound call mode
 
-This will:
-1. Start the FastAPI server on the configured port
-2. Initiate an outbound call to the specified phone number
-3. Handle the call with VAD, STT, LLM, and TTS
+Server-only mode starts the server and waits for inbound calls.
+Outbound mode additionally initiates a call to the specified number.
 """
 
 import os
@@ -66,19 +65,14 @@ def start_server(port: int) -> None:
 
 def main():
     """Main entry point."""
-    # Check for phone number argument
-    if len(sys.argv) < 2:
-        print("Usage: python main.py +1234567890")
-        print("  Phone number must be in E.164 format")
-        sys.exit(1)
-    
-    phone_number = sys.argv[1]
-    
-    # Validate phone number format
-    if not phone_number.startswith("+"):
-        print("Error: Phone number must start with +")
-        sys.exit(1)
-    
+    phone_number = None
+
+    if len(sys.argv) >= 2:
+        phone_number = sys.argv[1]
+        if not phone_number.startswith("+"):
+            print("Error: Phone number must start with +")
+            sys.exit(1)
+
     # Check environment
     if not check_environment():
         sys.exit(1)
@@ -100,13 +94,17 @@ def main():
     time.sleep(2)
     Logger.server_ready(public_url)
     
-    # Make outbound call
-    Logger.call_initiating(phone_number)
     try:
-        call_sid = make_outbound_call(phone_number)
-        Logger.call_initiated(call_sid)
-        logger.info("Waiting for call to connect... (Ctrl+C to end)")
-        
+        if phone_number:
+            # Outbound call mode
+            Logger.call_initiating(phone_number)
+            call_sid = make_outbound_call(phone_number)
+            Logger.call_initiated(call_sid)
+            logger.info("Waiting for call to connect... (Ctrl+C to end)")
+        else:
+            # Server-only mode — wait for inbound calls
+            logger.info("Server-only mode — waiting for inbound calls (Ctrl+C to end)")
+
         # Keep main thread alive
         while True:
             time.sleep(1)
