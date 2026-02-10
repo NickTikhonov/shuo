@@ -71,6 +71,8 @@ def make_chart(data: dict, save_path: Optional[str] = None) -> None:
     ax.invert_yaxis()
     ax.set_xlabel("Time to First Token (ms)", fontsize=11, labelpad=8)
 
+    from matplotlib.ticker import MultipleLocator
+    ax.xaxis.set_major_locator(MultipleLocator(50))
     ax.xaxis.grid(True, linestyle="-", alpha=0.12)
     ax.yaxis.grid(False)
     ax.set_axisbelow(True)

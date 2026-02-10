@@ -156,7 +156,7 @@ def _render_turn(ax: plt.Axes, turn: dict) -> None:
 
     ax.set_title(
         f"\"{display_text}\"",
-        fontsize=10,
+        fontsize=12,
         loc="left",
         pad=10,
     )
@@ -283,7 +283,7 @@ def _render_turn(ax: plt.Axes, turn: dict) -> None:
     ax.set_xlabel("ms from turn start", fontsize=8, color="#999")
     ax.xaxis.set_major_formatter(FuncFormatter(_fmt_ms))
     ax.invert_yaxis()
-    ax.set_xlim(left=0, right=5000)
+    ax.set_xlim(left=0, right=3000)
     ax.grid(axis="x", alpha=0.2, linestyle=":")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
