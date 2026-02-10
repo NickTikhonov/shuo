@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Visualize TTFT benchmark results as a chart.
+Visualize TTFT benchmark results as a box plot.
 
 Usage:
-    python scripts/bench_chart.py                          # reads from stdin
+    python scripts/bench_chart.py                          # uses embedded data
     python scripts/bench_chart.py bench_results.json       # reads from file
     python scripts/bench_chart.py --save ttft_chart.png    # save to file
 """
@@ -23,85 +23,72 @@ DATA = {"prompt":"Explain how a combustion engine works.","runs_per_model":10,"r
 
 def make_chart(data: dict, save_path: Optional[str] = None) -> None:
     results = data["results"]
-    # Sort by avg TTFT (fastest first)
-    results = sorted(results, key=lambda r: r.get("avg_ms", float("inf")))
+    # Sort by median TTFT (fastest first)
+    results = sorted(results, key=lambda r: np.median(r.get("all_ms", [r.get("avg_ms", 0)])))
 
     models = [r["model"] for r in results]
-    avgs = [r["avg_ms"] for r in results]
-    mins = [r["min_ms"] for r in results]
-    maxs = [r["max_ms"] for r in results]
     all_points = [r.get("all_ms", []) for r in results]
-
     n = len(models)
-    y = np.arange(n)
 
-    # Colors: blue for 4-series, orange for 5-series
-    colors = ["#2D5BE3" if "4" in m else "#E84A2A" for m in models]
+    def _color(m: str) -> str:
+        if m.startswith("groq/"):
+            return "#F57C00"  # orange for Groq
+        if "5" in m:
+            return "#E84A2A"  # red for 5-series
+        return "#2D5BE3"      # blue for 4-series
 
-    fig, ax = plt.subplots(figsize=(12, max(4, n * 0.7)))
-    fig.patch.set_facecolor("#FAFAFA")
-    ax.set_facecolor("#FAFAFA")
+    colors = [_color(m) for m in models]
 
-    # Min-max range bars
-    for i in range(n):
-        ax.barh(y[i], maxs[i] - mins[i], left=mins[i], height=0.35,
-                color=colors[i], alpha=0.15, edgecolor="none")
+    fig, ax = plt.subplots(figsize=(10, max(3.5, n * 0.55)))
+    fig.patch.set_facecolor("white")
+    ax.set_facecolor("white")
 
-    # Individual data points (jittered slightly)
-    for i, pts in enumerate(all_points):
-        jitter = np.random.default_rng(42).uniform(-0.12, 0.12, len(pts))
-        ax.scatter(pts, [y[i]] * len(pts) + jitter, color=colors[i],
-                   alpha=0.4, s=18, zorder=3, edgecolors="none")
+    bp = ax.boxplot(
+        all_points,
+        vert=False,
+        patch_artist=True,
+        widths=0.5,
+        whis=1.5,  # default: 1.5× IQR
+        medianprops=dict(color="white", linewidth=2),
+        whiskerprops=dict(color="#AAA", linewidth=1),
+        capprops=dict(color="#AAA", linewidth=1),
+        showfliers=True,
+        flierprops=dict(marker="o", markersize=4, alpha=0.5, markeredgecolor="none"),
+    )
 
-    # Average markers
-    ax.scatter(avgs, y, color=colors, s=90, zorder=4, edgecolors="white",
-               linewidths=1.5, marker="D")
+    for i, (patch, color) in enumerate(zip(bp["boxes"], colors)):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.7)
+        patch.set_edgecolor(color)
+        bp["fliers"][i].set_markerfacecolor(color)
 
-    # Labels on the right of each avg marker
-    for i in range(n):
-        ax.text(avgs[i] + 30, y[i], f"{avgs[i]:.0f} ms",
-                va="center", ha="left", fontsize=10, fontweight="bold",
-                color=colors[i])
+    # Scale x-axis to the largest whisker cap (ignore fliers)
+    whisker_max = max(line.get_xdata().max() for line in bp["whiskers"])
+    ax.set_xlim(0, whisker_max * 1.12)
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(models, fontsize=11, fontfamily="monospace")
+    ax.set_yticks(range(1, n + 1))
+    ax.set_yticklabels(models, fontsize=10, fontfamily="monospace")
     ax.invert_yaxis()
-    ax.set_xlabel("Time to First Token (ms)", fontsize=12, labelpad=10)
-    ax.set_xlim(0, max(maxs) * 1.15)
+    ax.set_xlabel("Time to First Token (ms)", fontsize=11, labelpad=8)
 
-    # Grid
-    ax.xaxis.grid(True, linestyle="--", alpha=0.3)
+    ax.xaxis.grid(True, linestyle="-", alpha=0.12)
     ax.yaxis.grid(False)
     ax.set_axisbelow(True)
 
-    # Remove top/right spines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(False)
+    for spine in ("top", "right", "left"):
+        ax.spines[spine].set_visible(False)
+    ax.spines["bottom"].set_color("#DDD")
 
-    # Title
-    fig.suptitle("OpenAI TTFT Benchmark — Hetzner Falkenstein (DE)",
-                 fontsize=14, fontweight="bold", y=0.97)
-    ax.set_title(f"10 runs per model, randomised order  ·  prompt: \"{data['prompt'][:50]}\"",
-                 fontsize=9, color="#888", pad=10)
-
-    # Legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], marker="D", color="w", markerfacecolor="#2D5BE3",
-               markersize=8, label="4-series avg"),
-        Line2D([0], [0], marker="D", color="w", markerfacecolor="#E84A2A",
-               markersize=8, label="5-series avg"),
-        Line2D([0], [0], marker="o", color="w", markerfacecolor="#999",
-               markersize=6, alpha=0.5, label="individual runs"),
-    ]
-    ax.legend(handles=legend_elements, loc="lower right", fontsize=9,
-              framealpha=0.8)
+    runs = data.get("runs_per_model", "?")
+    fig.suptitle("OpenAI TTFT — Hetzner Falkenstein (DE)",
+                 fontsize=13, fontweight="bold", y=0.98)
+    ax.set_title(f"{runs} runs / model, randomised  ·  median marked",
+                 fontsize=8, color="#999", pad=8)
 
     plt.tight_layout(rect=[0, 0, 1, 0.94])
 
     if save_path:
-        fig.savefig(save_path, dpi=200, bbox_inches="tight", facecolor=fig.get_facecolor())
+        fig.savefig(save_path, dpi=200, bbox_inches="tight", facecolor="white")
         print(f"Saved to {save_path}")
     else:
         plt.show()
