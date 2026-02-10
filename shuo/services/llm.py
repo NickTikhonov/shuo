@@ -1,5 +1,5 @@
 """
-OpenAI LLM service with streaming.
+LLM service with streaming (Groq, OpenAI-compatible).
 """
 
 import os
@@ -30,7 +30,10 @@ class LLMService:
         self._on_token = on_token
         self._on_done = on_done
         
-        self._client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+        self._client = AsyncOpenAI(
+            api_key=os.getenv("GROQ_API_KEY", ""),
+            base_url="https://api.groq.com/openai/v1",
+        )
         self._task: Optional[asyncio.Task] = None
         self._running = False
         
@@ -82,7 +85,7 @@ class LLMService:
             ] + self._history
             
             stream = await self._client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
                 messages=messages,
                 stream=True,
                 max_tokens=500,
