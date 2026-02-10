@@ -30,6 +30,11 @@ logger = get_logger("shuo.server")
 
 app = FastAPI(title="shuo", docs_url=None, redoc_url=None)
 
+# ── Graceful shutdown / connection draining ───────────────────────────
+_draining = False          # Set True on SIGTERM — reject new calls
+_active_calls = 0          # Count of live WebSocket conversations
+_drain_event = asyncio.Event()  # Signalled when _active_calls hits 0
+
 
 @app.get("/health")
 async def health():
@@ -43,7 +48,18 @@ async def twiml():
     Return TwiML instructing Twilio to connect a WebSocket stream.
     
     Twilio calls this URL when the call is answered.
+    During graceful shutdown, rejects new calls so they don't get cut off.
     """
+    if _draining:
+        # Reject new calls during shutdown — Twilio will play a message and hang up
+        logger.info("Draining — rejecting new inbound call")
+        reject_twiml = """<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Say>Sorry, we are updating. Please call back in a moment.</Say>
+    <Hangup/>
+</Response>"""
+        return Response(content=reject_twiml, media_type="application/xml")
+
     public_url = os.getenv("TWILIO_PUBLIC_URL", "")
     ws_url = public_url.replace("https://", "wss://").replace("http://", "ws://")
     ws_url = f"{ws_url}/ws"
@@ -273,10 +289,20 @@ async def websocket_endpoint(websocket: WebSocket):
     WebSocket endpoint for Twilio Media Streams.
     
     Handles the bidirectional audio stream for a single call.
+    Tracks active connections for graceful shutdown draining.
     """
+    global _active_calls
+
     await websocket.accept()
-    
+    _active_calls += 1
+    logger.info(f"Call connected  (active: {_active_calls})")
+
     try:
         await run_conversation_over_twilio(websocket)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+    finally:
+        _active_calls -= 1
+        logger.info(f"Call ended  (active: {_active_calls})")
+        if _draining and _active_calls <= 0:
+            _drain_event.set()
