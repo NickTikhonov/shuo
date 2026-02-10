@@ -152,11 +152,24 @@ async def _measure_ttft(client: AsyncOpenAI, model: str) -> float:
         "stream": True,
         token_param: 20,
     }
-    if not is_new:
+    if is_new:
+        # Use lowest reasoning effort the model accepts:
+        # try "none" first, fall back to "minimal"
+        params["extra_body"] = {"reasoning_effort": "none"}
+    else:
         params["temperature"] = 0
 
     t0 = time.perf_counter()
-    stream = await client.chat.completions.create(**params)
+    try:
+        stream = await client.chat.completions.create(**params)
+    except Exception as e:
+        if is_new and "none" in str(e).lower():
+            # Model doesn't support "none" — retry with "minimal"
+            params["extra_body"] = {"reasoning_effort": "minimal"}
+            t0 = time.perf_counter()
+            stream = await client.chat.completions.create(**params)
+        else:
+            raise
     async for chunk in stream:
         delta = chunk.choices[0].delta if chunk.choices else None
         if delta and delta.content:
