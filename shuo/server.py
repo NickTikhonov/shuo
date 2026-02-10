@@ -6,14 +6,21 @@ Endpoints:
 - GET/POST /twiml - Returns TwiML for Twilio to connect WebSocket
 - WebSocket /ws - Media stream endpoint
 - GET /trace/latest - Returns the most recent call trace as JSON
+- GET /bench/ttft - Benchmark TTFT across OpenAI models
 """
 
 import json
 import os
+import time
+import asyncio
+import random
+from collections import defaultdict
 from pathlib import Path
+from typing import List, Optional
 
-from fastapi import FastAPI, WebSocket, Response
+from fastapi import FastAPI, WebSocket, Response, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
+from openai import AsyncOpenAI
 
 from .conversation import run_conversation_over_twilio
 from .services.twilio_client import make_outbound_call
@@ -81,6 +88,136 @@ async def trigger_call(phone_number: str):
         return {"status": "calling", "to": phone_number, "call_sid": call_sid}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+## ── TTFT Benchmark ──────────────────────────────────────────────
+
+BENCH_PROMPT = "Explain how a combustion engine works."
+
+DEFAULT_MODELS = [
+    # 4-series
+    "gpt-4o-mini",
+    "gpt-4o",
+    "gpt-4.1-nano",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    # 5-series
+    "gpt-5-nano",
+    "gpt-5-mini",
+    "gpt-5",
+    "gpt-5.1",
+    "gpt-5.2",
+]
+
+BENCH_MESSAGES = [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": BENCH_PROMPT},
+]
+
+
+async def _measure_ttft(client: AsyncOpenAI, model: str) -> float:
+    """
+    Single TTFT measurement in milliseconds.
+
+    Opens a streaming completion, records time-to-first-content-token,
+    then closes the stream immediately.
+    """
+    # GPT-5+ uses max_completion_tokens; older models use max_tokens
+    is_new = model.startswith(("gpt-5", "o1", "o3", "o4"))
+    token_param = "max_completion_tokens" if is_new else "max_tokens"
+
+    params: dict = {
+        "model": model,
+        "messages": BENCH_MESSAGES,
+        "stream": True,
+        token_param: 20,
+    }
+    if not is_new:
+        params["temperature"] = 0
+
+    t0 = time.perf_counter()
+    stream = await client.chat.completions.create(**params)
+    async for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            ttft_ms = (time.perf_counter() - t0) * 1000
+            await stream.close()
+            return ttft_ms
+    # edge case: no content tokens at all
+    return (time.perf_counter() - t0) * 1000
+
+
+
+@app.get("/bench/ttft")
+async def bench_ttft(
+    models: Optional[str] = Query(
+        None,
+        description="Comma-separated model names. Defaults to a built-in list.",
+    ),
+    runs: int = Query(30, ge=1, le=100, description="Runs per model"),
+):
+    """
+    Benchmark TTFT across OpenAI-compatible models.
+
+    Usage:
+        curl https://your-server/bench/ttft
+        curl https://your-server/bench/ttft?models=gpt-4o-mini,gpt-4o&runs=5
+    """
+    model_list = (
+        [m.strip() for m in models.split(",") if m.strip()]
+        if models
+        else DEFAULT_MODELS
+    )
+
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY", ""))
+
+    # Build a shuffled schedule: each model appears `runs` times, interleaved
+    schedule = [(m, i) for m in model_list for i in range(runs)]
+    random.shuffle(schedule)
+
+    total = len(schedule)
+    logger.info(f"TTFT benchmark: {len(model_list)} models × {runs} runs = {total} calls (randomised)")
+
+    times_by_model: dict[str, list[float]] = defaultdict(list)
+    errors_by_model: dict[str, list[str]] = defaultdict(list)
+
+    for idx, (model, run_i) in enumerate(schedule, 1):
+        try:
+            ms = await _measure_ttft(client, model)
+            times_by_model[model].append(round(ms, 1))
+            logger.info(f"  [{idx}/{total}] {model} #{run_i+1} → {ms:.0f} ms")
+        except Exception as e:
+            errors_by_model[model].append(f"run {run_i+1}: {e}")
+            logger.info(f"  [{idx}/{total}] {model} #{run_i+1} → ERROR")
+
+    # Aggregate stats per model (preserve original model order)
+    results = []
+    for model in model_list:
+        t = times_by_model.get(model, [])
+        errs = errors_by_model.get(model, [])
+        if not t:
+            results.append({"model": model, "error": errs[0] if errs else "no data"})
+            logger.info(f"  {model} → ERROR: {errs[0] if errs else 'no data'}")
+            continue
+        avg = round(sum(t) / len(t), 1)
+        entry: dict = {
+            "model": model,
+            "runs": len(t),
+            "avg_ms": avg,
+            "min_ms": min(t),
+            "max_ms": max(t),
+            "all_ms": t,
+        }
+        if errs:
+            entry["errors"] = errs
+        results.append(entry)
+        logger.info(f"  {model} → avg {avg} ms  (min {min(t)}, max {max(t)})")
+
+    return JSONResponse({
+        "prompt": BENCH_PROMPT,
+        "runs_per_model": runs,
+        "results": results,
+    })
 
 
 @app.websocket("/ws")
