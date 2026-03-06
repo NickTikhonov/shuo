@@ -6,7 +6,7 @@ Endpoints:
 - GET/POST /twiml - Returns TwiML for Twilio to connect WebSocket
 - WebSocket /ws - Media stream endpoint
 - GET /trace/latest - Returns the most recent call trace as JSON
-- GET /bench/ttft - Benchmark TTFT across OpenAI models
+- GET /bench/ttft - Benchmark TTFT across Groq and OpenAI style LLMs
 """
 
 import json
@@ -128,6 +128,8 @@ DEFAULT_MODELS = [
     # Groq
     ("groq/llama-3.3-70b",  "groq", "llama-3.3-70b-versatile"),
     ("groq/llama-3.1-8b",   "groq", "llama-3.1-8b-instant"),
+    # Local
+    ("local/default", "local", os.getenv("LOCAL_LLM_MODEL", os.getenv("LLM_MODEL", "default"))),
 ]
 
 BENCH_MESSAGES = [
@@ -140,13 +142,21 @@ def _make_clients() -> dict:
     """Build provider → AsyncOpenAI client map."""
     clients = {}
     oai_key = os.getenv("OPENAI_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    local_key = os.getenv("LOCAL_LLM_API_KEY", "no-key"),
+    local_url = os.getenv("LOCAL_LLM_BASE_URL", "")
     if oai_key:
         clients["openai"] = AsyncOpenAI(api_key=oai_key)
-    groq_key = os.getenv("GROQ_API_KEY", "")
+
     if groq_key:
         clients["groq"] = AsyncOpenAI(
             api_key=groq_key,
             base_url="https://api.groq.com/openai/v1",
+        )
+    if local_url:
+        clients["local"] = AsyncOpenAI(
+            api_key=local_key,
+            base_url=local_url,
         )
     return clients
 
@@ -210,13 +220,13 @@ async def bench_ttft(
 
     Usage:
         curl https://your-server/bench/ttft
-        curl https://your-server/bench/ttft?models=gpt-4o-mini,gpt-4o&runs=5
+        curl https://your-server/bench/ttft?models=local/default,groq/llama-3.3-70b&runs=5
     """
     clients = _make_clients()
 
     # Build model list: use DEFAULT_MODELS or parse comma-separated overrides
     if models:
-        # For custom input, assume openai provider unless "groq/" prefixed
+        # For custom input, assume groq provider unless explicitly prefixed.
         entries = []
         for m in models.split(","):
             m = m.strip()
@@ -224,8 +234,10 @@ async def bench_ttft(
                 continue
             if m.startswith("groq/"):
                 entries.append((m, "groq", m.removeprefix("groq/")))
+            elif m.startswith("local/"):
+                entries.append((m, "local", m.removeprefix("local/")))
             else:
-                entries.append((m, "openai", m))
+                entries.append((f"groq/{m}", "groq", m))
         model_entries = entries
     else:
         model_entries = DEFAULT_MODELS

@@ -66,7 +66,7 @@ class StreamStartEvent:
 
 ### 6. `shuo/services/llm.py`
 - Add constructor params: `system_prompt`, `model`, `provider`, `temperature`, `max_tokens` (all optional, fall back to current defaults)
-- Provider-based client: `"groq"` → Groq base_url, `"openai"` → default OpenAI
+- Provider-based client: `"groq"` → Groq base_url, `"local"` → Use LOCAL_LLM_BASE_URL as the base URL for the OpenAI api.
 - Use instance attrs in `_generate()` instead of hardcoded values / env reads
 - Add `add_assistant_message(content)` for first_message support
 

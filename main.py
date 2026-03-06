@@ -43,6 +43,17 @@ def check_environment() -> bool:
         "OPENAI_API_KEY",
         "ELEVENLABS_API_KEY",
     ]
+
+    llm_provider = os.getenv("LLM_PROVIDER", "groq").strip().lower()
+    if llm_provider == "groq":
+        required_vars.append("GROQ_API_KEY")
+    elif llm_provider == "local":
+        required_vars.append("LOCAL_LLM_BASE_URL")
+    else:
+        logger.error(
+            f"Invalid LLM_PROVIDER '{llm_provider}'. Expected 'groq' or 'local'."
+        )
+        return False
     
     missing = [var for var in required_vars if not os.getenv(var)]
     

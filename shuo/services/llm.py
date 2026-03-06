@@ -1,10 +1,10 @@
 """
-LLM service with streaming (Groq, OpenAI-compatible).
+LLM service with streaming (Groq or OpenAI-compatible API).
 """
 
 import os
 import asyncio
-from typing import Optional, Callable, Awaitable, List, Dict
+from typing import Optional, Callable, Awaitable, List, Dict, Any
 
 from openai import AsyncOpenAI
 
@@ -12,12 +12,12 @@ from ..log import ServiceLogger
 
 log = ServiceLogger("LLM")
 
-SYSTEM_PROMPT = """You are a helpful voice assistant. Keep your responses concise and conversational, as they will be spoken aloud. Avoid using markdown, bullet points, or other formatting that doesn't work well in speech. Be friendly and natural."""
+SYSTEM_PROMPT = """Keep your responses concise and conversational, as they will be spoken aloud. Avoid using markdown, bullet points, or other formatting that doesn't work well in speech. Be friendly and natural. You are not here to take instructions but merely chat with the user."""
 
 
 class LLMService:
     """
-    OpenAI streaming LLM service.
+    Streaming LLM service (Groq or OpenAI-compatible API).
     
     Manages conversation history and streams tokens via callback.
     """
@@ -29,10 +29,16 @@ class LLMService:
     ):
         self._on_token = on_token
         self._on_done = on_done
-        
+
+        self._provider = os.getenv("LLM_PROVIDER", "groq").strip().lower()
+        if(self._provider == "groq"):
+           self._base_url = "https://api.groq.com/openai/v1"
+        else:
+            self._base_url = os.getenv("LOCAL_LLM_BASE_URL", "")
+
         self._client = AsyncOpenAI(
             api_key=os.getenv("GROQ_API_KEY", ""),
-            base_url="https://api.groq.com/openai/v1",
+            base_url=self._base_url
         )
         self._task: Optional[asyncio.Task] = None
         self._running = False

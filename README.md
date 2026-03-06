@@ -48,7 +48,7 @@ shuo/
   server.py             # FastAPI endpoints
   services/
     flux.py             # Deepgram Flux (STT + turns)
-    llm.py              # OpenAI GPT-4o-mini streaming
+    llm.py              # Local and Groq LLM streaming
     tts.py              # ElevenLabs WebSocket streaming
     tts_pool.py         # TTS connection pool (warm spares)
     player.py           # Audio playback to Twilio

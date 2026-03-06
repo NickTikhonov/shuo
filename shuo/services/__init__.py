@@ -2,7 +2,7 @@
 External services for the shuo voice agent pipeline.
 
 Deepgram Flux  -- STT + turn detection
-OpenAI         -- LLM streaming
+Local/Groq     -- LLM streaming
 ElevenLabs     -- TTS streaming + connection pool
 Twilio         -- outbound calls + audio playback
 """
