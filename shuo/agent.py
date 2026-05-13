@@ -174,7 +174,7 @@ class Agent:
         if not self._active or not self._tts:
             return
         self._tracer.end(self._turn, "llm")
-        await self._tts.flush()
+        await self._tts.finish()
 
     async def _on_tts_audio(self, audio_base64: str) -> None:
         """TTS produced audio -> send to player."""
