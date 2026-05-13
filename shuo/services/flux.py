@@ -123,32 +123,37 @@ class FluxService:
         self._connection = None
         self._client = None
 
+    def _get(self, message, key, default=None):
+        if isinstance(message, dict):
+            return message.get(key, default)
+        return getattr(message, key, default)
+
     async def _on_message(self, message, *args, **kwargs) -> None:
         """Handle Flux messages -- parse TurnInfo events."""
         try:
-            msg_type = getattr(message, "type", None)
+            msg_type = self._get(message, "type")
 
             if msg_type == "TurnInfo":
-                event = getattr(message, "event", None)
+                event = self._get(message, "event")
 
                 if event == "EndOfTurn":
-                    transcript = getattr(message, "transcript", "") or ""
+                    transcript = self._get(message, "transcript") or ""
                     await self._on_end_of_turn(transcript.strip())
 
                 elif event == "StartOfTurn":
                     await self._on_start_of_turn()
 
             elif msg_type == "Results" and self._on_interim:
-                channel = getattr(message, "channel", None)
+                channel = self._get(message, "channel")
                 if channel:
-                    alternatives = getattr(channel, "alternatives", None)
+                    alternatives = self._get(channel, "alternatives")
                     if alternatives:
                         alt = (
                             alternatives[0]
                             if isinstance(alternatives, list)
                             else alternatives
                         )
-                        transcript = getattr(alt, "transcript", "")
+                        transcript = self._get(alt, "transcript") or ""
                         if transcript:
                             await self._on_interim(transcript.strip())
 
